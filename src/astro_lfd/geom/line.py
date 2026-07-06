@@ -10,7 +10,14 @@ from numpy.typing import ArrayLike, NDArray
 
 import lsst.geom as geom
 
-__all__ = ["LineFitResult", "Line2D", "LineSegment2D"]
+__all__ = [
+    "LineFitResult",
+    "Line2D",
+    "LineSegment2D",
+    "fit_line_segment_from_xy",
+    "embed_rho_theta",
+]
+
 
 @dataclass
 class LineFitResult:
@@ -27,11 +34,12 @@ class LineFitResult:
     aspect_ratio : `float`
         The length divided by the estimated width.
     """
-    
+
     line_segment: LineSegment2D
     rms: float
     width: float
     aspect_ratio: float
+
 
 class LineGeometry2D(ABC):
     """Abstract base class for transformable line geometries."""
@@ -43,7 +51,7 @@ class LineGeometry2D(ABC):
     @abstractmethod
     def from_points(cls, p0: geom.Point2D, p1: geom.Point2D) -> Self:
         """Construct the line geometry from two defining points.
-        
+
         Parameters
         ----------
         p0, p1 : `lsst.geom.Point2D`
@@ -51,7 +59,7 @@ class LineGeometry2D(ABC):
 
         Returns
         -------
-        line_geom : `mixcoatl.streaks.line.LineGeometry2D`
+        line_geom : `astro_lfd.geom.line.LineGeometry2D`
             The line geometry defined by the two points.
         """
         ...
@@ -59,10 +67,10 @@ class LineGeometry2D(ABC):
     @abstractmethod
     def as_line(self) -> Line2D:
         """Get the line representation of the line geometry.
-        
+
         Returns
         -------
-        line : `mixcoatl.streaks.line.Line2D
+        line : `astro_lfd.geom.line.Line2D`
             The line representation.
         """
         ...
@@ -70,7 +78,7 @@ class LineGeometry2D(ABC):
     @abstractmethod
     def at(self, s: float) -> geom.Point2D:
         """Evaluate the line geometry at the line direction coordinate.
-        
+
         Parameters
         ----------
         s : `float`
@@ -82,11 +90,11 @@ class LineGeometry2D(ABC):
             The point on the line.
         """
         ...
-    
+
     @abstractmethod
     def contains(self, point: geom.Point2D, atol: float = 1e-12) -> bool:
         """Return `True` if point lies on the line geometry.
-        
+
         Parameters
         ----------
         point : `lsst.geom.Point2D`
@@ -109,7 +117,7 @@ class LineGeometry2D(ABC):
         atol: float = 1e-12,
     ) -> list[geom.Point2D]:
         """Return the  intersection points with a box boundary.
-        
+
         Parameters
         ----------
         box : `lsst.geom.Box2I` or `lsst.geom.Box2D`
@@ -127,7 +135,7 @@ class LineGeometry2D(ABC):
     @abstractmethod
     def _defining_points(self) -> tuple[geom.Point2D, geom.Point2D]:
         """Return the two points defining the line geometry.
-        
+
         Returns
         -------
         p0, p1 : `lsst.geom.Point2D`
@@ -138,7 +146,7 @@ class LineGeometry2D(ABC):
     @abstractmethod
     def _interval_in_box(self, box: geom.Box2I | geom.Box2D) -> geom.IntervalD | None:
         """Return the valid parameter interval in a box boundary.
-        
+
         Parameters
         ----------
         box : `lsst.geom.Box2I` or `lsst.geom.Box2D`
@@ -153,7 +161,7 @@ class LineGeometry2D(ABC):
 
     def clipped_to(self, box: geom.Box2D | geom.Box2I) -> LineSegment2D | None:
         """Clip line geometry to a box.
-        
+
         Parameters
         ----------
         box : `lsst.geom.Box2I` or `lsst.geom.Box2D`
@@ -161,7 +169,7 @@ class LineGeometry2D(ABC):
 
         Returns
         -------
-        line_segment : `mixcoatl.streaks.line.LineSegment2D`
+        line_segment : `astro_lfd.geom.line.LineSegment2D`
             The segment of the line geometry clipped to the box.
         """
         interval = self._interval_in_box(box)
@@ -180,14 +188,14 @@ class LineGeometry2D(ABC):
 
         Returns
         -------
-        line_segment : `mixcoatl.streaks.line.LineSegment2D`
+        line_segment : `astro_lfd.geom.line.LineSegment2D`
             The segment of the line geometry that intersects the box.
         """
         return self.clipped_to(box)
 
-    def transformed(self, transform: Any, baseline: float = 10.0) -> Self:
+    def transformed(self, transform: Any) -> Self:
         """Apply a geometric transformation.
-        
+
         The supplied transform maps points expressed in the current coordinate
         system into points in the target coordinate system.
 
@@ -197,13 +205,10 @@ class LineGeometry2D(ABC):
                     `lsst.afw.geom.TransformPoint2ToPoint2`
             Transform that maps points from the current coordinate system into
             the target coordinate system.
-        baseline : `float`, optional
-            The distance between the two points to be transformed (10.0, by
-            default).
 
         Returns
         -------
-        transformed : `mixcoatl.streaks.line.LineGeometry2D`
+        transformed : `astro_lfd.geom.line.LineGeometry2D`
             A new line geometry in the target coordinate system.
         """
         p0, p1 = self._defining_points()
@@ -223,14 +228,14 @@ class LineGeometry2D(ABC):
 
         Returns
         -------
-        transformed : `mixcoatl.streaks.line.LineGeometry2D`
+        transformed : `astro_lfd.geom.line.LineGeometry2D`
             The transformed line geometry.
         """
         return self.transformed(geom.AffineTransform.makeRotation(angle))
 
     def scaled(self, factor: float) -> Self:
         """Apply a scaling transformation.
-        
+
         Parameters
         ----------
         factor : `float`
@@ -238,14 +243,14 @@ class LineGeometry2D(ABC):
 
         Returns
         -------
-        transformed : `mixcoatl.streaks.line.LineGeometry2D`
+        transformed : `astro_lfd.geom.line.LineGeometry2D`
             The transformed line geometry.
         """
         return self.transformed(geom.AffineTransform.makeScaling(factor))
 
     def translated(self, offset: geom.Extent2D) -> Self:
         """Apply a translation transformation.
-        
+
         Parameters
         ----------
         offset : `lsst.geom.Extent2D`
@@ -253,11 +258,10 @@ class LineGeometry2D(ABC):
 
         Returns
         -------
-        transformed : `mixcoatl.streaks.line.LineGeometry2D`
+        transformed : `astro_lfd.geom.line.LineGeometry2D`
             The transformed line geometry.
         """
         return self.transformed(geom.AffineTransform.makeTranslation(offset))
-
 
 
 class Line2D(LineGeometry2D):
@@ -279,7 +283,7 @@ class Line2D(LineGeometry2D):
 
         Returns
         -------
-        line : `mixcoatl.streaks.line.Line2D`
+        line : `astro_lfd.geom.line.Line2D`
             An instance of `Line2D` defined by the two points.
         """
         return cls.from_point_and_direction(p0, p1 - p0)
@@ -297,7 +301,7 @@ class Line2D(LineGeometry2D):
 
         Returns
         -------
-        line : `mixcoatl.streaks.line.Line2D`
+        line : `astro_lfd.geom.line.Line2D`
             An instance of `Line2D` defined by the point and direction.
 
         Raises
@@ -342,16 +346,15 @@ class Line2D(LineGeometry2D):
 
     @property
     def origin(self) -> geom.Point2D:
-        """The point on the line closest to the origin (`lsst.geom.Point2D`).
-        """
+        """The point on the line closest to the origin (`lsst.geom.Point2D`)."""
         return geom.Point2D(self.normal * self.rho)
 
     def as_line(self) -> Line2D:
         """Return the line representation.
-        
+
         Returns
         -------
-        line : `mixcoatl.streaks.line.Line2D`
+        line : `astro_lfd.geom.line.Line2D`
             The line representation.
         """
         return self
@@ -361,13 +364,13 @@ class Line2D(LineGeometry2D):
 
     def contains(self, point: geom.Point2D, atol: float = 1e-12) -> bool:
         """Return `True` if the point lies on the line."""
-        return abs(self.distance(point)) <= atol
+        return abs(self.signed_distance(point)) <= atol
 
     def intersections_with_box_edges(
         self,
         box: geom.Box2I | geom.Box2D,
         atol: float = 1e-12,
-    ) ->list[geom.Point2D]:
+    ) -> list[geom.Point2D]:
         """Return intersection points with box boundary."""
         o = self.origin
         d = self.direction
@@ -395,9 +398,8 @@ class Line2D(LineGeometry2D):
             for q in unique:
                 if p.distanceSquared(q) <= atol * atol:
                     break
-
-        else:
-            unique.append(p)
+            else:
+                unique.append(p)
 
         return unique
 
@@ -438,7 +440,7 @@ class LineSegment2D(LineGeometry2D):
         self._line = line
         self._interval = interval
 
-    @classmethod    
+    @classmethod
     def from_center_length(cls, line: Line2D, u_center: float, length: float) -> Self:
         h = 0.5 * length
         interval = geom.IntervalD.fromSpannedPoints((u_center - h, u_center + h))
@@ -519,7 +521,7 @@ class LineSegment2D(LineGeometry2D):
             p for p in self.line.intersections_with_box_edges(box, atol=atol) if self.contains(p, atol=atol)
         ]
 
-    def _defining_points(self) -> tuple[geom.Point2D, geom.point2D]:
+    def _defining_points(self) -> tuple[geom.Point2D, geom.Point2D]:
         """Return segment endpoints."""
         return self.p0, self.p1
 
@@ -553,7 +555,7 @@ def embed_rho_theta(
 
     if theta_tol < 1e-12:
         raise ValueError(f"theta_tol too small for stable embedding: {theta_tol}")
-    
+
     rho = np.asarray(rho, dtype=np.float64)
     theta = np.asarray(theta, dtype=np.float64)
 
@@ -568,7 +570,7 @@ def embed_rho_theta(
     return embedded_points
 
 
-def fit_line_segment_from_xy(x: ArrayLike, y: ArrayLike, weights: ArrayLike | None = None) -> LineSegment2D:
+def fit_line_segment_from_xy(x: ArrayLike, y: ArrayLike, weights: ArrayLike | None = None) -> LineFitResult:
     """Fit a weighted line segment to 2D points.
 
     Parameters
@@ -580,8 +582,9 @@ def fit_line_segment_from_xy(x: ArrayLike, y: ArrayLike, weights: ArrayLike | No
 
     Returns
     -------
-    segment : `LineSegment2D`
-        Best-fit finite line segment.
+    result : `LineFitResult`
+        Best-fit finite line segment plus the fit residual, estimated width,
+        and aspect ratio.
     """
     x = np.asarray(x, dtype=np.float64)
     y = np.asarray(y, dtype=np.float64)
@@ -620,12 +623,13 @@ def fit_line_segment_from_xy(x: ArrayLike, y: ArrayLike, weights: ArrayLike | No
     theta = math.atan2(normal[1], normal[0])
     line = Line2D(rho, theta * geom.radians)
 
-    distances = np.array([line.signed_distance(geom.Point2D(px, py)) for px, py in zip(x, y, strict=True)])
-    projections = [line.project(geom.Point2D(px, py)) for px, py in zip(x, y, strict=True)]
+    sample_points = [geom.Point2D(float(px), float(py)) for px, py in points]
+    distances = np.array([line.signed_distance(p) for p in sample_points])
+    projections = [line.project(p) for p in sample_points]
     interval = geom.IntervalD.fromSpannedPoints(projections)
 
     line_segment = LineSegment2D(line=line, interval=interval)
-    rms = np.sqrt(np.average(np.array(distances)**2, weights=w))
+    rms = np.sqrt(np.average(np.array(distances) ** 2, weights=w))
     width = 2.355 * rms
     aspect_ratio = line_segment.length / width
 
@@ -640,7 +644,7 @@ def fit_line_segment_from_xy(x: ArrayLike, y: ArrayLike, weights: ArrayLike | No
 def _apply_transform(transform: Any, point: geom.Point2D) -> geom.Point2D:
     """Apply a transform to a point.
 
-    Apply a transformation to a point either by calling the applyForward 
+    Apply a transformation to a point either by calling the applyForward
     method of the object or calling the object directly.
 
     Parameters
@@ -691,20 +695,20 @@ def _canonicalize(rho: float, theta: geom.Angle) -> tuple[float, geom.Angle]:
     if theta_rad >= math.pi:
         theta_rad -= math.pi
         rho = -rho
-    
+
     return rho, theta_rad * geom.radians
 
 
 def _dot(v0: geom.Extent2D, v1: geom.Extent2D) -> float:
     """Compute the Euclidean dot product of two vectors.
-    
+
     Parameters
     ----------
     v0 : `lsst.geom.Extent2D`
         The first vector.
     v1 : `lsst.geom.Extent2D`
         The second vector.
-        
+
     Returns
     -------
     dot_product : `float`
