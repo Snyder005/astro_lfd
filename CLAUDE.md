@@ -4,42 +4,62 @@ Guidance for Claude Code (and other agents) working in this repository.
 
 ## Project Overview
 
-**astro-adrt** develops a **Linear Feature Detector (LFD)** for astronomical
-images, built on the **Approximate Discrete Radon Transform (ADRT)**.
+**astro_lfd** is a Python library for **Linear Feature Detection (LFD)** in
+astronomical images acquired by the **LSST Camera**. Its first detector is built
+on the **Approximate Discrete Radon Transform (ADRT)**.
 
 The goal is to detect linear features — e.g. satellite streaks, cosmic-ray
-tracks, diffraction spikes, and other roughly-straight signals — in
-astronomical imagery by exploiting the fact that a line in image space maps to
-a localized peak in Radon (offset, angle) space.
+tracks, diffraction spikes, and other roughly-straight signals — by exploiting
+the fact that a line in image space maps to a localized peak in Radon
+(offset, angle) space.
 
-- **Language:** Python
+- **Language:** Python (≥3.13), **src-layout** package (`src/astro_lfd/`).
 - **Core dependency:** the [`adrt`](https://adrt.readthedocs.io) package
   (currently v1.2.0), which provides the ADRT and its inverse/adjoint.
-- **Domain:** astronomical image processing.
+- **Domain:** astronomical image processing (LSST Science Pipelines context).
 
 ## Repository Layout
 
 ```
-astro-adrt/
+astro_lfd/
+├── src/
+│   └── astro_lfd/
+│       ├── geom/          # line geometry / coordinate conventions
+│       ├── meas/          # measurement of detected features
+│       ├── pipe/          # LSST Science Pipelines tasks / drivers
+│       ├── table/         # detection output tables
+│       └── utils/         # helpers, incl. testdata.py (synthetic images)
+├── tests/                 # unit tests (pytest)
+├── docs/                  # design docs (LFD_DESIGN.md)
+├── knowledge/             # progressively refined knowledge base (see below)
+├── notebooks/             # scratch notebooks for testing and development
+├── pyproject.toml         # packaging + black/mypy/pytest config
 ├── CLAUDE.md              # this file
-└── knowledge/             # progressively refined knowledge base (see below)
+├── CONTRIBUTING.md        # LSST-stack environment setup
+└── README.md
 ```
 
-As the project matures, prefer graduating stable code out of notebooks into an
-importable package (e.g. `astro_adrt/`) with tests.
+Most subpackages are currently scaffolding (empty `__init__.py`). Prefer
+graduating stable code out of notebooks into these modules with tests.
 
 ## Environment & Dependencies
 
-- Python 3.13; `adrt` is installed under the user site-packages.
-- Common scientific stack: `numpy`, `matplotlib`, `scikit-image`.
+- Python ≥3.13. Developed against the shared Rubin/LSST stack on SDF; install
+  `astro_lfd` on top with `pip install -e ".[dev]"`. Full setup (including the
+  Claude Code cache-loader and the conda `auto_activate_base` gotcha) is in
+  **`CONTRIBUTING.md`**.
+- Runtime deps: `numpy`, `scipy`, `adrt`. Dev: `black`, `mypy`, `pytest`.
 - Some experiments reference Rubin Observatory / LSST tooling
-  (`lsst.daf.butler`, `lsst.obs.lsst`, `mixcoatl`). These are **optional** and
-  environment-specific; core LFD code should not hard-depend on them.
+  (`lsst.afw.image`, `lsst.daf.butler`, `lsst.obs.lsst`, `mixcoatl`). These are
+  **optional** and environment-specific; core LFD code should not hard-depend on
+  them (see the lazy afw adapter in `astro_lfd.utils.testdata`).
 
 Verify the environment before running code:
 
 ```bash
-python -c "import adrt; print(adrt.__version__)"
+which python                                  # expect .../lsst-scipipe-*/bin/python
+python -c "import adrt; print(adrt.__version__)"   # expect 1.2.0
+python -m pytest tests/ -q                    # expect 15 passed
 ```
 
 ## Core Development Rules
@@ -71,6 +91,30 @@ python -c "import adrt; print(adrt.__version__)"
   - use `black` to fix PEP 8
   - use `mypy` for static type checking
   - use `pytest` for unit tests
+
+## Git Workflow
+
+- Always use feature branches; do not commit directly to `main`
+  - Name branches descriptively: `fix/auth-timeout`, `documentation/code_examples`, `feature/api-pagination`
+  - Keep one logical change per branch to simplify review and rollback
+- Create pull requests for all changes
+  - Open a draft PR early for visibility; convert to ready when complete
+  - Ensure tests pass locally before marking ready for review
+- Link issues
+  - Before starting, reference an existing issue or create one
+  - Use commit/PR messages like `Fixes #123` for auto-linking and closure
+- Commit practices
+  - Make atomic commits (one logical change per commit)
+  - Prefer conventional commit style: `type(scope): short description`
+    - Examples: `feature(eval): group OBS logs per test`, `fix(cli): handle missing API key`
+  - Squash only when merging to `main`; keep granular history on the feature branch
+- Practical workflow
+  1. Create or reference an issue
+  2. `git checkout -b feature/issue-123-description`
+  3. Commit in small, logical increments
+  4. Open a draft PR early
+  5. Convert to ready PR when functionally complete and tests pass
+  6. Never merge automatically, always prompt first
 
 ## ADRT Package — Essential Facts
 

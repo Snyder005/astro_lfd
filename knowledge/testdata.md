@@ -1,4 +1,4 @@
-# Synthetic test images (`astro_adrt.testdata`)
+# Synthetic test images (`astro_lfd.utils.testdata`)
 
 **When relevant:** generating LFD test images, or feeding their planes into the
 ADRT detector — what arrays exist, their shapes/dtypes/units, and how they map
@@ -21,7 +21,7 @@ difference image.
 
 Shape is `(ny, nx)`, default `(4004, 4096)` = LSST Camera science sensor
 (rows × cols). These map to the LFD design inputs `D` (image), `V` (variance),
-`M` (mask) in `LFD_DESIGN.md` §3.
+`M` (mask) in `docs/LFD_DESIGN.md` §3.
 
 ## Array-input contract for the ADRT detector — READ THIS
 
@@ -31,7 +31,7 @@ the detector front-end MUST pad/tile before `adrt.adrt()`:
 
 - Default `(4004, 4096)` → pad to `(8192, 8192)` (next pow2 square) with
   `numpy.pad(..., constant_values=0)`; record pad offsets to map coordinates
-  back (LFD_DESIGN §Step 0). 0-pad is safe: zeros add nothing to line sums.
+  back (docs/LFD_DESIGN §Step 0). 0-pad is safe: zeros add nothing to line sums.
 - For fast unit tests / experiments, pass `shape=(256,256)` (or any pow2
   square) to `simulate_exposure` so output is ADRT-ready with no padding.
 - The detector transforms the **significance image `S = D/√V`**, not the raw
@@ -55,7 +55,7 @@ has 16 per-amp gains).
 ## Minimal usage
 
 ```python
-from astro_adrt import testdata as td
+from astro_lfd.utils import testdata as td
 ti = td.simulate_exposure(td.StreakConfig(theta=30.0, rho=2000.0, width=20.0,
                                           peak_signal=1000.0),
                           band="i", seed=42)          # default (4004,4096) nJy
@@ -74,4 +74,4 @@ small = td.simulate_exposure(td.StreakConfig(rho=128.0), shape=(256, 256), seed=
 - `save_npz` uses `allow_pickle=False`; `meta` is stored as its `repr` and
   restored with `ast.literal_eval` (safe, no pickle).
 
-**See also:** [adrt-api](adrt-api.md), [LFD design](../LFD_DESIGN.md)
+**See also:** [adrt-api](adrt-api.md), [LFD design](../docs/LFD_DESIGN.md)
