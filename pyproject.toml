@@ -1,0 +1,32 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "astro_lfd"
+version = "0.0.1"
+description = "Linear Feature Detection for LSST Camera images using the ADRT."
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "numpy",
+    "scipy",
+    "adrt>=1.2.0",
+]
+
+[project.optional-dependencies]
+dev = ["black", "mypy", "pytest"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/astro_lfd"]
+
+[tool.black]
+line-length = 110
+
+[tool.mypy]
+python_version = "3.13"
+# Third-party scientific/LSST packages ship without type stubs.
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

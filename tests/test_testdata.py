@@ -1,4 +1,4 @@
-"""Unit tests for :mod:`astro_adrt.testdata`.
+"""Unit tests for :mod:`astro_lfd.utils.testdata`.
 
 Covers the streak profile, the radiometric simulation (shapes/dtypes, unit
 conversion, reproducibility), and both I/O paths.  The afw FITS tests are
@@ -13,7 +13,7 @@ import math
 import numpy as np
 import pytest
 
-from astro_adrt import testdata as td
+from astro_lfd.utils import testdata as td
 
 # A small, fast, power-of-two-square shape so the ADRT could consume the output
 # directly (the detector requires square power-of-two float input).
