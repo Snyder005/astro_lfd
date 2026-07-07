@@ -5,8 +5,11 @@ Guidance for Claude Code (and other agents) working in this repository.
 ## Project Overview
 
 **astro_lfd** is a Python library for **Linear Feature Detection (LFD)** in
-astronomical images acquired by the **LSST Camera**. Its first detector is built
-on the **Approximate Discrete Radon Transform (ADRT)**.
+astronomical images acquired by the **LSST Camera**. It is built as an
+**extension to the LSST Science Pipelines stack**: the stack is a prerequisite
+for running the package (see `CONTRIBUTING.md` for setup), and detectors are
+formulated as standard LSST tasks operating on `lsst.afw` data products. Its
+first detector is built on the **Approximate Discrete Radon Transform (ADRT)**.
 
 The goal is to detect linear features — e.g. satellite streaks, cosmic-ray
 tracks, diffraction spikes, and other roughly-straight signals — by exploiting
@@ -17,6 +20,11 @@ the fact that a line in image space maps to a localized peak in Radon
 - **Core dependency:** the [`adrt`](https://adrt.readthedocs.io) package
   (currently v1.2.0), which provides the ADRT and its inverse/adjoint.
 - **Domain:** astronomical image processing (LSST Science Pipelines context).
+- **Stack coupling:** most subpackages depend on the LSST stack (`lsst.geom`,
+  `lsst.afw.*`, `lsst.pipe.base`, `lsst.meas.algorithms`, …). Only `utils/` is
+  kept stack-independent; where non-stack numpy/ADRT code must interoperate with
+  the stack, the bridge is done with explicit to/from converter functions (as in
+  `astro_lfd.utils.testdata`), not by taking a hard dependency in the core.
 
 ## Repository Layout
 
@@ -61,6 +69,18 @@ which python                                  # expect .../lsst-scipipe-*/bin/py
 python -c "import adrt; print(adrt.__version__)"   # expect 1.2.0
 python -m pytest tests/ -q                    # expect 15 passed
 ```
+
+### Shell startup is slow on the first call
+
+The **first** Bash command in a session resolves `loadLSST.sh` +
+`setup lsst_distrib` over NFS, which takes tens of seconds and can time out.
+Don't interpret an early hang as a broken command — let it finish (or re-run)
+once and it is cached. A cache-loader (`~/.claude/lsst-env-loader.sh`, wired via
+`BASH_ENV` in `~/.claude/settings.json`) snapshots the resolved environment so
+every subsequent call is fast, and self-heals when the `w_latest` target
+changes. Force a rebuild with `refresh-lsst-env`. Full recipe and the conda
+`auto_activate_base` gotcha are in **`CONTRIBUTING.md`** → "Speeding up the LSST
+stack for Claude Code".
 
 ## Core Development Rules
 
