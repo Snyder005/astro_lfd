@@ -41,6 +41,12 @@ the detector front-end MUST pad/tile before `adrt.adrt()`:
   chase detection changes; there are none.
 - `float32` planes: cast to `float64`/`float32` as the ADRT expects float; fine
   as-is. Poisson/normal draws are done in electrons then divided by `calib`.
+- **`mask` starts empty** — but the detector tasks need a `DETECTED` plane as the
+  seed ([detector-task](detector-task.md)). Set it by thresholding the
+  *noise-free* `streak_signal` at N·sigma, e.g. (as in the comparison harness
+  `scripts/kht_maskstreaks_compare.py`):
+  `detected = streak_signal(...) > 5*sqrt(read_noise**2 + sky + signal)`, then
+  `exposure.mask.array[detected] |= mask.getPlaneBitMask("DETECTED")`.
 
 ## Units (the notebook's open issue, resolved)
 
