@@ -227,17 +227,21 @@ class KHTDetectTask(pipeBase.Task):
         detected_mask = get_pixel_mask(mask, self.config.detected_mask_plane)
         init_edges = canny(detected_mask.astype(np.float64), use_quantiles=True, sigma=0.1)
 
-        # Mask invalid regions before line finding.
-        bad_mask = binary_dilation(get_pixel_mask(mask, list(self.config.bad_mask_planes)), 1)
+        # Mask invalid regions before line finding.  The bad planes get a
+        # one-pixel buffer for the edge image (so the borders of bad regions
+        # are also ignored), but the fit weights below are zeroed on the
+        # *undilated* bad planes to match `MaskStreaksTask._fitProfile`.
+        bad_mask = get_pixel_mask(mask, list(self.config.bad_mask_planes))
+        dilated_bad_mask = binary_dilation(bad_mask, 1)
         if self.config.saturated_detections_dilation:
             sat_mask = get_pixel_mask(mask, "SAT")
             sat_detected_mask = binary_dilation(
                 sat_mask & detected_mask,
                 self.config.saturated_detections_dilation,
             )
-            invalid = sat_detected_mask | bad_mask
+            invalid = sat_detected_mask | dilated_bad_mask
         else:
-            invalid = bad_mask
+            invalid = dilated_bad_mask
         edges = init_edges & ~invalid
 
         # Run the Kernel Hough Transform on the edge image.
@@ -257,6 +261,9 @@ class KHTDetectTask(pipeBase.Task):
         rhos, thetas = self._cluster_lines(lines.rho, lines.theta)
 
         # Build fit weights: inverse variance, with invalid pixels zeroed.
+        # Zero on the undilated bad planes (not the one-pixel-dilated edge
+        # mask) so the pixels driving the profile fit match those used by
+        # `MaskStreaksTask._fitProfile`.
         weights = variance**-1
         weights[~np.isfinite(weights) | ~np.isfinite(image)] = 0
         weights[bad_mask] = 0
