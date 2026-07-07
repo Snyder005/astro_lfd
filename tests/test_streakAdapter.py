@@ -35,6 +35,26 @@ def test_minimal_schema_has_line_fields() -> None:
         assert field in names
 
 
+def test_minimal_schema_has_quality_fields() -> None:
+    """The minimal schema exposes the profile-fit quality fields."""
+    schema = StreakAdapter.makeMinimalSchema()
+    names = set(schema.getNames())
+    for field in ("line_sigma", "line_reduced_chi2", "line_model_maximum"):
+        assert field in names
+
+
+def test_quality_fields_roundtrip() -> None:
+    """The profile-fit quality fields set and read back through the adapter."""
+    adapter = _make_adapter()
+    adapter["line_sigma"] = 7.25
+    adapter["line_reduced_chi2"] = 9.5
+    adapter["line_model_maximum"] = 2271.0
+
+    assert adapter["line_sigma"] == pytest.approx(7.25)
+    assert adapter["line_reduced_chi2"] == pytest.approx(9.5)
+    assert adapter["line_model_maximum"] == pytest.approx(2271.0)
+
+
 # --- round-trip -------------------------------------------------------------
 def test_line_segment_roundtrip() -> None:
     """set/getLineSegment preserves rho, theta, center, and length."""

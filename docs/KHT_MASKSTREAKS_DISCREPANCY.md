@@ -157,3 +157,80 @@ jointly-detected streaks once #1 and #2 are reconciled; the remaining
 differences (#3–#6) affect *which* streaks appear and *what metadata* is carried,
 not the fitted line of a shared detection. Empirical confirmation follows the
 harness in `KHT_MASKSTREAKS_TESTPLAN.md`.
+
+---
+
+## Empirical results (harness run 2026-07-07)
+
+**Harness:** `scripts/kht_maskstreaks_compare.py`. Runs `MaskStreaksTask.find`
+and `KHTDetectTask.run` on the *same* exposure, maps both outputs into the
+absolute-pixel `theta∈[0,π)` frame (reference `Line` wrapped in the same
+`Line2D(rho,θ°).translated(bboxCenter)` transform KHT applies to its own fit,
+so #1 and #2 are reconciled identically for both sides), matches by `(rho,
+theta)` within `(rho_bin_size=40 px, theta_bin_size=2°)`, and reports residuals
+plus a KMeans jitter floor. Configs were aligned (shared numeric knobs equal;
+`bad_mask_planes` set to the reference `NO_DATA, INTRP, BAD, SAT, EDGE` — i.e.
+`ITL_DIP`/`SPIKE` dropped, per review §3). KMeans `random_state` was pinned to 0
+for the matched run via a harness-local monkeypatch (no task code changed).
+
+**Inputs:** (A) synthetic `testdata` exposure (θ=30°, ρ=1500, one streak, a
+`DETECTED` plane thresholded from the noise-free signal at 5σ); (B) two real
+`difference_image`s (visit `2025071700631`, detectors 140 & 136), each with a
+populated `STREAK`/`DETECTED`/`SAT` mask and one high-SNR streak.
+
+| Input | n_ref | n_kht | matched | max \|Δρ\| (px) | max \|Δθ\| (deg) | max \|Δlen\| (px) | KMeans jitter |
+|---|---|---|---|---|---|---|---|
+| A: testdata (seed 12345) | 1 | 1 | 1 | **0.0000** | **0.0000** | 0.0000 | 0 |
+| B: diffim det 140 | 1 | 1 | 1 | 0.0041 | 0.00008 | 0.0013 | 0 |
+| B: diffim det 136 | 1 | 1 | 1 | 0.0102 | 0.00008 | 0.0034 | 0 |
+
+**Count agreement:** perfect on all three inputs — same number of lines, all
+matched, zero unmatched on either side. #6 (acceptance / footprint-vs-mask) did
+**not** manifest as a membership difference here (single clean streak per frame;
+would need a multi-streak or margin case to exercise).
+
+**Jitter floor (#4):** with `n_init="auto"` and *no* seed, three repeat runs of
+each task gave identical line counts and `max|Δρ|=0`, `max|Δθ|=0` within each
+task on all inputs. On these single-streak frames the recursive-KMeans stop rule
+converges to the same centers every time, so the jitter floor is effectively
+zero — every residual below is real, not jitter. (A denser field could still
+jitter; the control remains worthwhile.)
+
+**#3 is the sole driver of the residual — confirmed by isolation.** On synthetic
+data (no bad pixels near the streak) the residual is *exactly* 0. On real data it
+is small but non-zero. Patching KHT's weight/edge bad-mask dilation to the
+reference's **undilated** behaviour (radius-1 → identity; SAT dilation of 250
+left intact) collapsed det-140's residual from `Δρ=0.00406` to **`Δρ=0.00000`,
+`Δθ=0.000000`**. Because the line *count* was unchanged (edges did not gain/lose
+a detection), the effect is entirely through the **fit weights**: KHT zeros
+weights on the **1-px-dilated** `bad_mask`, whereas `maskStreaks._fitProfile`
+zeros them on the **undilated** `badMask` (`maskStreaks.py:891–894`). This is the
+weight-masking bug flagged in review §3.
+
+### Re-ranked conclusions
+
+- **#1, #2 (frame/canonicalization):** confirmed pure representation. Once both
+  sides use the same translate + `[0,π)` fold, matched `Δρ/Δθ` are ~0. Not bugs.
+- **#3 (weight masking):** **the** substantive code difference. Small on these
+  frames (< 0.01 px) but a genuine, avoidable divergence in the shared fit; it
+  will grow wherever more bad pixels sit within `nSigmaMask` of a streak. **Fix
+  recommended** (align KHT fit weights to the *undilated* bad planes). The
+  bad-plane *set* (`ITL_DIP`/`SPIKE`) and EDT-vs-SpanSet dilation *shape* were
+  neutralized here by aligning the lists; they remain latent count-level
+  differences worth quantifying separately if a frame exercises them.
+- **#4 (KMeans):** no measurable jitter on these inputs; `random_state` pinning
+  worked. Native intent is `n_init="auto"` unseeded — see proposed API note below.
+- **#5 (missing fields):** unchanged — KHT still discards `sigma`,`reducedChi2`,
+  `modelMaximum`. No geometric impact; blocks quality-based reproduction.
+- **#6 (acceptance/footprint):** not triggered by single-streak frames.
+
+**Overall:** the reformulation is **geometrically equivalent** to `MaskStreaksTask`
+for jointly-detected streaks — matched lines agree to < 0.01 px / < 0.0001° on
+real data and *exactly* on synthetic — with the residual fully explained by the
+§3 weight-dilation difference. Reproduce with:
+
+```bash
+python scripts/kht_maskstreaks_compare.py --source testdata
+python scripts/kht_maskstreaks_compare.py --source butler --detector 140
+python scripts/kht_maskstreaks_compare.py --source butler --detector 136
+```
