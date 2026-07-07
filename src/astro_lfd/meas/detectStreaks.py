@@ -293,6 +293,7 @@ class KHTDetectTask(pipeBase.Task):
 
             line_model.setLineMask(fit, self.config.max_streak_width, self.config.nsigma_mask)
             final_model = line_model.makeProfile(fit)
+            model_maximum = abs(final_model).max()
             final_line_mask = abs(final_model) > self.config.footprint_threshold
             if not final_line_mask.any():
                 continue
@@ -315,6 +316,11 @@ class KHTDetectTask(pipeBase.Task):
                 streak.setCoord(wcs.pixelToSky(center))
             streak["line_center_x"] = center.getX()
             streak["line_center_y"] = center.getY()
+            # Carry the profile-fit quality metrics.  `fit` is a maskStreaks
+            # `Line` whose `reducedChi2` field holds the reduced chi-squared.
+            streak["line_sigma"] = fit.sigma
+            streak["line_reduced_chi2"] = fit.reducedChi2
+            streak["line_model_maximum"] = float(model_maximum)
 
         self.log.info("Accepted %d streak(s) after profile fitting", len(streaks))
         return pipeBase.Struct(streaks=streaks, edges=edges)
