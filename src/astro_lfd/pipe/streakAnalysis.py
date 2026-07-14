@@ -1,4 +1,11 @@
 # To Do: Add runQuantum function to incorporate partial failures and id generator
+
+# mypy: disable-error-code="var-annotated, attr-defined"
+# `lsst.pex.config.Field` descriptors are declared in the `Config` class body
+# without a type annotation and read back as instance attributes; mypy cannot
+# model this dynamic descriptor protocol, so the resulting false positives are
+# silenced for this module (as in `astro_lfd.meas.detectStreaks`).
+
 import lsst.afw.image as afwImage
 import lsst.afw.table as afwTable
 import lsst.pex.config as pexConfig
@@ -23,7 +30,7 @@ class StreakAnalysisConnections(
     )
     dia_streaks = pipeBase.connectionTypes.Output(
         doc="Detected dia_streaks on the difference image.",
-        name="{fakesType}{coaddName}Diff_diaStreaks",
+        name="{fakesType}{coaddName}Diff_diaStrk",
         storageClass="SourceCatalog",
         dimensions=("instrument", "visit", "detector"),
     )
@@ -36,7 +43,7 @@ class StreakAnalysisConfig(pipeBase.PipelineTaskConfig, pipelineConnections=Stre
         doc="Line detection algorithm to use.",
         allowed={
             "kht": "Kernel Hough Transform.",
-            #"adrt": "Approximate Discrete Radon Transform.",
+            # "adrt": "Approximate Discrete Radon Transform.",
         },
     )
 
@@ -48,8 +55,8 @@ class StreakAnalysisConfig(pipeBase.PipelineTaskConfig, pipelineConnections=Stre
 
 
 class StreakAnalysisTask(pipeBase.PipelineTask):
-    """Detect and measure linear features on a difference image.
-    """
+    """Detect and measure linear features on a difference image."""
+
     ConfigClass = StreakAnalysisConfig
     _DefaultName = "streakAnalysis"
 
@@ -71,17 +78,16 @@ class StreakAnalysisTask(pipeBase.PipelineTask):
 
         Returns
         -------
-        results : `lsst.pipe.base.Struct`
-        
-            ``dia_streaks`` : `lsst.afw.table.SourceCatalog`
-                The catalog of detected streaks.
-        """ 
+        result : `lsst.pipe.base.Struct`
+            Result as a struct with attributes:
+
+            ``dia_streaks``
+                Catalog of detected streaks (`lsst.afw.table.SourceCatalog`).
+        """
         schema = StreakAdapter.makeMinimalSchema()
         table = afwTable.SourceTable.make(schema)
-        results = pipeBase.Struct()
 
         if self.config.detection_algorithm == "kht":
-            detect_results = self.kht_detect.run(table, exposure)
+            detect_result = self.kht_detect.run(table, difference)
 
-        results.streaks = detect_results.streaks
-        return results
+        return pipeBase.Struct(dia_streaks=detect_result.streaks)

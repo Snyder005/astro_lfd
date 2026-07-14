@@ -1,3 +1,4 @@
+import lsst.afw.image as afwImage
 import lsst.afw.table as afwTable
 import lsst.geom as geom
 import lsst.pipe.base as pipeBase
@@ -5,14 +6,16 @@ import lsst.pipe.base as pipeBase
 from astro_lfd.geom import Line2D
 from astro_lfd.table import StreakAdapter
 
-__all__ = ["WriteStreakTaskConfig", "WriteStreakCatalogTask"]
+__all__ = ["WriteStreakCatalogConfig", "WriteStreakCatalogTask"]
 
 
 class WriteStreakCatalogConnections(
-    pipeBase.PipelineTaskConnections, 
+    pipeBase.PipelineTaskConnections,
     dimensions=("instrument", "visit", "detector"),
     defaultTemplates={"catalogType": "", "coaddName": "deep", "fakesType": ""},
 ):
+    """Connections for `WriteStreakCatalogTask`."""
+
     streaks = pipeBase.connectionTypes.Input(
         doc="Structured dictionary of streak fit parameters for the difference image.",
         name="{catalogType}streaks",
@@ -26,10 +29,10 @@ class WriteStreakCatalogConnections(
         dimensions=("instrument", "visit", "detector"),
     )
     output_catalog = pipeBase.connectionTypes.Output(
-        doc="Catalog of streaks in Astropy format.",
-        name="{catalogType}streakTable",
-        storageClass="ArrowAstropy",
-        dimensions=("instrument", "visit"),
+        doc="Catalog of detected streaks on the difference image.",
+        name="{catalogType}strk",
+        storageClass="SourceCatalog",
+        dimensions=("instrument", "visit", "detector"),
     )
 
 
@@ -37,25 +40,48 @@ class WriteStreakCatalogConfig(
     pipeBase.PipelineTaskConfig,
     pipelineConnections=WriteStreakCatalogConnections,
 ):
+    """Configurable parameters for `WriteStreakCatalogTask`."""
+
     pass
 
 
 class WriteStreakCatalogTask(pipeBase.PipelineTask):
-    """Write streaks dictionary to Astropy table format.
-    """
+    """Write streaks dictionary to Astropy table format."""
+
     _DefaultName = "writeStreakCatalog"
     ConfigClass = WriteStreakCatalogConfig
 
-    def run(self, streaks, difference):
+    def run(self, streaks: dict, difference: afwImage.ExposureF) -> pipeBase.Struct:
+        """Convert `streaks` structured dictionary to a catalog.
 
+        Parameters
+        ----------
+        streaks: `dict`
+            Structured dictionary of detected streaks to be converted.
+        difference: `lsst.afw.image.ExposureF`
+            Difference image with detection mask plane filled in.
+
+        Returns
+        -------
+        result : `lsst.pipe.base.Struct`
+            Result as a struct with attributes:
+
+            ``output_catalog``
+                Catalog of detected streaks (`lsst.afw.table.SourceCatalog`).
+        """
         schema = StreakAdapter.makeMinimalSchema()
         table = afwTable.SourceTable.make(schema)
         catalog = afwTable.SourceCatalog(table)
 
-        wcs = differnece.getWcs()
+        wcs = difference.getWcs()
         box = difference.getBBox()
+        # The streak parameters are recorded in image-array coordinates
+        # centered on the image, so map each line into absolute pixel
+        # coordinates by translating from the image center (matching
+        # `astro_lfd.meas.detectStreaks.KHTDetectTask`).
         shift = geom.Extent2D(box.getCenter())
-        for n in range(len(num_streaks)):
+        num_streaks = len(streaks["rho"])
+        for n in range(num_streaks):
             kht_line = Line2D(streaks["rho"][n], streaks["theta"][n] * geom.degrees)
             det_line = kht_line.translated(shift)
             line_segment = det_line.intersection(box)
@@ -63,16 +89,17 @@ class WriteStreakCatalogTask(pipeBase.PipelineTask):
                 continue
             center = line_segment.center
 
-            streak = StreakAdapter(streaks.addNew())
+            streak = StreakAdapter(catalog.addNew())
             streak.setLineSegment(line_segment)
-            #streak.setFootprint(footprint)  # No way to separate individual mask contribution
+            # No way to separate individual mask contribution, so the
+            # per-streak footprint is left unset.
             if wcs is not None:
                 streak.setCoord(wcs.pixelToSky(center))
             streak["line_center_x"] = center.getX()
             streak["line_center_y"] = center.getY()
-            streak["line_sigma"] = fit.sigma
-            streak["line_reduced_chi2"] = fit.reducedChi2
-            streak["line_model_maximum"] = float(model_maximum)
+            streak["line_sigma"] = streaks["sigma"][n]
+            streak["line_reduced_chi2"] = streaks["reducedChi2"][n]
+            streak["line_model_maximum"] = float(streaks["modelMaximum"][n])
 
         result = pipeBase.Struct(output_catalog=catalog)
         return result

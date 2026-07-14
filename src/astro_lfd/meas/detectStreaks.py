@@ -208,14 +208,13 @@ class KHTDetectTask(pipeBase.Task):
         Returns
         -------
         result : `lsst.pipe.base.Struct`
-            Results as a struct with attributes:
+            Result as a struct with attributes:
 
             ``streaks``
-                `~lsst.afw.table.SourceCatalog` of detected streaks, one record
-                per accepted line.
+                Catalog of detected streaks (`lsst.afw.table.SourceCatalog`).
             ``edges``
-                `numpy.ndarray`, the boolean Canny edge image used for line
-                finding, with invalid regions removed.
+                Boolean Canny edge image used for line finding, with invalid 
+                regions removed (`numpy.ndarray`).
         """
         image = exposure.image.array
         variance = exposure.variance.array
