@@ -1,8 +1,9 @@
-# LFD detector-task template (KHT today, ADRT next)
+# LFD detector-task template (shared across detectors)
 
-**When relevant:** building the ADRT detector task, or any new `astro_lfd`
-line detector — the shared task formulation, input contract, output format, and
+**When relevant:** building any `astro_lfd` line detector (the ADRT core, or a
+new method) — the shared task formulation, input contract, output format, and
 coordinate handling that stay the same when only the *line-finding core* changes.
+KHT is the validated reference implementation of this template.
 
 **Verified:** distilled from the validated `KHTDetectTask`
 (`knowledge/kht-detect.md`) and its comparison against `MaskStreaksTask`,
@@ -22,19 +23,19 @@ The KHT pipeline, with the **swappable core marked**:
 1. Read `image`, `variance`, `mask` from the `ExposureF`; make the output
    `SourceCatalog(table)`; grab `wcs = exposure.getWcs()` (may be `None`).
 2. `detected_mask = get_pixel_mask(mask, config.detected_mask_plane)`.
-3. **[CORE — replace for ADRT]** Canny edges → remove invalid regions →
+3. **[CORE — swap per detector]** Canny edges → remove invalid regions →
    `lsst.kht.find_lines` → recursive-KMeans clustering → list of candidate
    `(rho, theta)` lines in the **image-centered** frame.
 4. Build fit weights (see contract below).
 5. Per candidate: `maskStreaks.LineProfile` Moffat fit → acceptance checks →
    map to absolute pixels + canonicalize → write a `StreakAdapter` row.
 
-The ADRT detector keeps **steps 1–2, 4–5 verbatim** and replaces **step 3**:
-Canny+KHT → `adrt.adrt(...)` on the significance image + peak-finding +
-coord mapping (see [adrt-api](adrt-api.md), [adrt-geometry] once written). The
-profile fit, output format, and frame handling are shared, so the ADRT lines
-should be directly comparable to KHT/`maskStreaks` lines with the same harness
-(`scripts/kht_maskstreaks_compare.py`).
+For example, the ADRT detector keeps **steps 1–2, 4–5 verbatim** and replaces
+**step 3**: Canny+KHT → `adrt.adrt(...)` on the significance image +
+peak-finding + coord mapping (see [adrt-api](adrt-api.md) and
+`../docs/detectors/adrt/design.md`). The profile fit, output format, and frame
+handling are shared, so a new detector's lines should be directly comparable to
+KHT/`maskStreaks` lines with the same harness (`scripts/kht_maskstreaks_compare.py`).
 
 ## Input contract (what `run` consumes)
 

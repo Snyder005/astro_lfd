@@ -12,17 +12,37 @@ source /sdf/group/rubin/sw/w_latest/loadLSST.sh
 setup lsst_distrib
 ```
 
-Then install `astro_lfd` on top of the stack in editable mode:
+Then install `astro_lfd` on top of the stack in editable mode. Dependencies are
+split per detector so you only pull in what a given detector needs (shared
+`numpy`/`scipy` are always installed as core):
 
 ```bash
-pip install -e ".[dev]"      # numpy, scipy, adrt + black, mypy, pytest
+pip install -e ".[all]"          # every detector backend + dev tools (recommended)
+# or pick per detector:
+pip install -e ".[kht,dev]"      # KHT: scikit-image, scikit-learn (+ lsst.kht from the stack)
+pip install -e ".[adrt,dev]"     # ADRT: adrt>=1.2.0
 ```
+
+**Environment model.** The environment *is* the LSST stack (weekly tag), with
+detector deps layered on top by the `pip install` above — this is the single,
+reproducible default, because the task-form detectors (`pipe/`, `meas/`) import
+stack-only modules (`lsst.kht`, `lsst.afw`, `lsst.pipe.base`,
+`lsst.meas.algorithms`) that are **not** pip-installable. The per-detector extras
+separate the *requirements*; the stack provides the shared *runtime*.
+
+*Stack-free fallback:* the `astro_lfd` core is kept stack-independent, so early
+numpy-level work (e.g. `utils.testdata` + a transform backend like `adrt`) can be
+installed and run in a plain venv with just `pip install -e ".[adrt]"`. The stack
+is required only once a detector reaches its LSST-task form.
 
 ### Verify
 
 ```bash
-python -c "import adrt; print('adrt', adrt.__version__)"   # expect 1.2.0
-python -m pytest tests/ -q                                 # 15 passed
+python -c "import numpy, scipy; print('core OK')"
+python -c "import skimage, sklearn; print('kht deps OK')"    # if kht extra installed
+python -c "import adrt; print('adrt', adrt.__version__)"     # if adrt extra installed; expect 1.2.0
+python -c "import lsst.kht, lsst.afw.image, lsst.pipe.base; print('stack OK')"  # needs the stack
+python -m pytest tests/ -q                                   # 48 passed
 black --line-length 110 --check src/ tests/
 mypy src/astro_lfd
 ```

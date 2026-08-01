@@ -6,9 +6,9 @@ reports count agreement, per-match residuals, and the KMeans jitter floor.
 
 This is a validation *script*, not library code -- it lives under ``scripts/``
 and is not imported by the package.  It backs the report appended to
-``docs/KHT_MASKSTREAKS_DISCREPANCY.md``.
+``docs/detectors/kht/maskstreaks-discrepancy.md``.
 
-Two input sources (see ``KHT_MASKSTREAKS_TESTPLAN.md``):
+Two input sources (see ``docs/detectors/kht/maskstreaks-testplan.md``):
 
 * ``--source testdata`` (Option A): a synthetic exposure from
   ``astro_lfd.utils.testdata`` with a ``DETECTED`` plane thresholded from the

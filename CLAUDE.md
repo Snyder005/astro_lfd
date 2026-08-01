@@ -8,23 +8,34 @@ Guidance for Claude Code (and other agents) working in this repository.
 astronomical images acquired by the **LSST Camera**. It is built as an
 **extension to the LSST Science Pipelines stack**: the stack is a prerequisite
 for running the package (see `CONTRIBUTING.md` for setup), and detectors are
-formulated as standard LSST tasks operating on `lsst.afw` data products. Its
-first detector is built on the **Approximate Discrete Radon Transform (ADRT)**.
+formulated as standard LSST tasks operating on `lsst.afw` data products.
 
 The goal is to detect linear features — e.g. satellite streaks, cosmic-ray
-tracks, diffraction spikes, and other roughly-straight signals — by exploiting
-the fact that a line in image space maps to a localized peak in Radon
-(offset, angle) space.
+tracks, diffraction spikes, and other roughly-straight signals — by mapping the
+image into a line parameter space and locating concentrations there.
+
+`astro_lfd` provides a **suite of interchangeable detectors** sharing a common
+LSST task template (see `knowledge/detector-task.md`), so a new method is added
+by swapping only the line-finding core. Detectors implemented / planned:
+
+- **Kernel Hough Transform (KHT)** — edge-based Hough voting; the current
+  reference detector (`astro_lfd.meas.detectStreaks`).
+- **Approximate Discrete Radon Transform (ADRT)** — line-integral transform via
+  the [`adrt`](https://adrt.readthedocs.io) package; the first non-Hough
+  detector (design in `docs/detectors/adrt/design.md`).
+- Further methods (e.g. Line Segment Detector, Frangi vesselness, YOLO) fit the
+  same interface.
 
 - **Language:** Python (≥3.13), **src-layout** package (`src/astro_lfd/`).
-- **Core dependency:** the [`adrt`](https://adrt.readthedocs.io) package
-  (currently v1.2.0), which provides the ADRT and its inverse/adjoint.
+- **Core dependencies:** `numpy`, `scipy`. Each detector backend is an
+  **optional extra** (e.g. `adrt`, `lsst.kht`) so the core never hard-depends on
+  one method; install with `pip install -e ".[adrt,dev]"`.
 - **Domain:** astronomical image processing (LSST Science Pipelines context).
 - **Stack coupling:** most subpackages depend on the LSST stack (`lsst.geom`,
   `lsst.afw.*`, `lsst.pipe.base`, `lsst.meas.algorithms`, …). Only `utils/` is
-  kept stack-independent; where non-stack numpy/ADRT code must interoperate with
-  the stack, the bridge is done with explicit to/from converter functions (as in
-  `astro_lfd.utils.testdata`), not by taking a hard dependency in the core.
+  kept stack-independent; where non-stack numpy/detector code must interoperate
+  with the stack, the bridge is done with explicit to/from converter functions
+  (as in `astro_lfd.utils.testdata`), not by taking a hard dependency in the core.
 
 ## Repository Layout
 
@@ -38,7 +49,7 @@ astro_lfd/
 │       ├── table/         # detection output tables
 │       └── utils/         # helpers, incl. testdata.py (synthetic images)
 ├── tests/                 # unit tests (pytest)
-├── docs/                  # design docs (LFD_DESIGN.md)
+├── docs/                  # unified LFD_DESIGN.md + per-detector docs/detectors/<method>/
 ├── knowledge/             # progressively refined knowledge base (see below)
 ├── notebooks/             # scratch notebooks for testing and development
 ├── pyproject.toml         # packaging + black/mypy/pytest config
@@ -53,10 +64,13 @@ graduating stable code out of notebooks into these modules with tests.
 ## Environment & Dependencies
 
 - Python ≥3.13. Developed against the shared Rubin/LSST stack on SDF; install
-  `astro_lfd` on top with `pip install -e ".[dev]"`. Full setup (including the
-  Claude Code cache-loader and the conda `auto_activate_base` gotcha) is in
+  `astro_lfd` on top with `pip install -e ".[dev]"` (add detector extras as
+  needed, e.g. `".[kht,dev]"` or `".[adrt,dev]"`; `".[all]"` for everything).
+  Full setup (including the Claude Code
+  cache-loader and the conda `auto_activate_base` gotcha) is in
   **`CONTRIBUTING.md`**.
-- Runtime deps: `numpy`, `scipy`, `adrt`. Dev: `black`, `mypy`, `pytest`.
+- Core runtime deps: `numpy`, `scipy`. Detector backends are **optional
+  extras** (e.g. `adrt>=1.2.0`). Dev: `black`, `mypy`, `pytest`.
 - Some experiments reference Rubin Observatory / LSST tooling
   (`lsst.afw.image`, `lsst.daf.butler`, `lsst.obs.lsst`, `mixcoatl`). These are
   **optional** and environment-specific; core LFD code should not hard-depend on
@@ -66,8 +80,8 @@ Verify the environment before running code:
 
 ```bash
 which python                                  # expect .../lsst-scipipe-*/bin/python
-python -c "import adrt; print(adrt.__version__)"   # expect 1.2.0
-python -m pytest tests/ -q                    # expect 15 passed
+python -c "import adrt; print(adrt.__version__)"   # expect 1.2.0 (if adrt extra installed)
+python -m pytest tests/ -q                    # expect 48 passed
 ```
 
 ### Shell startup is slow on the first call
@@ -136,73 +150,77 @@ stack for Claude Code".
   5. Convert to ready PR when functionally complete and tests pass
   6. Never merge automatically, always prompt first
 
-## ADRT Package — Essential Facts
+## Detectors
 
-Grounding facts (verified against installed v1.2.0). Keep these accurate; if the
-installed version changes, re-verify.
+Every detector is a plain `lsst.pipe.base.Task` sharing one template — same
+input contract, weights rule, output `SourceCatalog`, and coordinate handling —
+differing only in the **line-finding core**. See `knowledge/detector-task.md`
+for the shared template and `knowledge/INDEX.md` for the per-detector notes.
 
-- **Input contract:** `adrt.adrt(a)` requires a **square** image whose side
-  length `N` is a **power of two**, dtype float. An optional leading **batch**
-  dimension is allowed (2-D or 3-D input). Pad with `numpy.pad` if needed.
-- **Output shape:** for input size `N`, each batch element yields shape
-  `(4, 2*N-1, N)` — four **quadrants**, each spanning π/4 of angle. The
-  `2*N-1` axis is **offset**; the `N` axis is **angle**.
-- **Key functions:**
-  - `adrt.adrt(a)` — forward ADRT.
-  - `adrt.iadrt(a)` — exact inverse.
-  - `adrt.iadrt_fmg(a, *, max_iters=None)` — iterative (full multigrid) inverse.
-  - `adrt.bdrt(a)` — back-projection / adjoint.
-  - `adrt.utils.stitch_adrt(a, remove_repeated=False)` — assemble the four
-    quadrants into one contiguous image (useful for visualization).
-  - `adrt.utils.unstitch_adrt(a)` — inverse of stitch.
-  - `adrt.utils.coord_adrt(N)` — map ADRT indices to `(offset, angle)` physical
-    coordinates. Central to interpreting detected peaks as image-space lines.
-  - `adrt.utils.interp_to_cart(...)` — interpolate ADRT output to Cartesian
-    (θ, s) sinogram coordinates.
-  - `adrt.utils.truncate(...)`, `coord_cart_to_adrt(...)` — coordinate/shape helpers.
-  - `adrt.core.*` — lower-level stepwise primitives (`adrt_step`, `num_iters`,
-    `threading_enabled`, …); usually not needed directly.
+Current registry:
 
-> When in doubt about the ADRT API, inspect the installed package
+| Detector | Core | Backend dep | Notes / docs |
+|---|---|---|---|
+| **KHT** | Canny edges → `lsst.kht.find_lines` → cluster | `kht` extra (scikit-image, scikit-learn) + `lsst.kht` (stack) | reference detector; `knowledge/kht-detect.md`, `docs/detectors/kht/` |
+| **ADRT** | line-integral transform → per-quadrant peak-finding | `adrt` extra (`adrt>=1.2.0`) | design in `docs/detectors/adrt/design.md`; API in `knowledge/adrt-api.md` |
+| *future* | e.g. Line Segment Detector, Frangi vesselness, YOLO | its own extra | add a `knowledge/<method>-*.md` note + `docs/detectors/<method>/` |
+
+Each backend is an **optional extra** so the core never hard-depends on one
+method. Detector-specific grounding facts (exact signatures, array shapes,
+gotchas) live in the knowledge base, **not** here — e.g. the ADRT input
+contract and `(4, 2N-1, N)` output layout are in `knowledge/adrt-api.md`.
+
+> When in doubt about a detector backend's API, inspect the installed package
 > (`inspect.getdoc`, `inspect.signature`) rather than guessing — then record
-> what you learn in the knowledge base below.
+> what you learn in the relevant knowledge-base note.
 
 ## Working Conventions
 
 - Prefer small, testable functions over notebook cells for anything reusable.
-- Keep the LFD core free of observatory-specific dependencies; isolate any
-  Butler/LSST I/O behind a thin, optional adapter layer.
-- Radon/ADRT geometry is easy to get subtly wrong (offset vs. angle axes,
-  quadrant orientation, power-of-two padding). Add assertions on array shapes
-  and dtypes at boundaries, and document the coordinate convention used.
-- When adding a nontrivial ADRT-related behavior, add a knowledge-base note
-  (see below) so the finding is not re-derived later.
+- Keep the LFD core free of observatory-specific and detector-specific
+  dependencies; isolate any Butler/LSST I/O behind a thin, optional adapter
+  layer, and each detector backend behind its optional extra.
+- Line-parameter geometry is easy to get subtly wrong (offset vs. angle axes,
+  quadrant orientation, power-of-two padding, `rho`/`theta` conventions). Add
+  assertions on array shapes and dtypes at boundaries, and document the
+  coordinate convention used.
+- When adding a nontrivial detector behavior, add a knowledge-base note (see
+  below) so the finding is not re-derived later.
 
 ## Knowledge Base — Progressively Refined (`knowledge/`)
 
 This section defines a **progressively refined knowledge base**: a curated,
-append-and-refine store of hard-won facts about the `adrt` package and the LFD
-domain, optimized for **quick, low-context recall** during development. The
-goal is that a future session can load a *small* amount of text and immediately
-be correct about the ADRT, instead of re-reading source, re-running
-experiments, or re-deriving geometry.
+append-and-refine store of hard-won facts about the LFD detectors, their backend
+packages, and the astronomical domain, optimized for **quick, low-context
+recall** during development. The goal is that a future session can load a
+*small* amount of text and immediately be correct about a detector, instead of
+re-reading source, re-running experiments, or re-deriving geometry.
 
 ### Why this exists
 
-The `adrt` package has non-obvious contracts (power-of-two square input, the
-`(4, 2N-1, N)` quadrant layout, offset/angle axis conventions). Re-discovering
-these burns context and invites subtle bugs. Capturing them once, tersely, pays
-off on every subsequent turn.
+Detector backends have non-obvious contracts (e.g. the `adrt` package's
+power-of-two square input and `(4, 2N-1, N)` quadrant layout; the KHT
+image-centered `(rho, theta)` frame). Re-discovering these burns context and
+invites subtle bugs. Capturing them once, tersely, pays off on every subsequent
+turn.
 
 ### Structure
+
+Notes fall into two groups — **shared** (apply across detectors) and
+**per-detector** (one method's backend/design). Add per-detector notes as
+`<method>-*.md` when a new detector lands.
 
 ```
 knowledge/
 ├── INDEX.md          # one-line pointer per note; the only file always loaded
+│   # shared
+├── detector-task.md  # the shared LSST-task template every detector inherits
+├── geom-line.md      # line geometry, rho/theta convention, StreakAdapter bridge
+├── testdata.md       # synthetic LFD test images and how they feed a detector
+│   # per-detector (ADRT)
 ├── adrt-api.md       # verified signatures, shapes, gotchas of the adrt package
-├── adrt-geometry.md  # offset/angle conventions, quadrants, coord mappings
-├── lfd-design.md     # detector design decisions, thresholds, peak-finding
-└── astro-domain.md   # astronomical specifics (streaks, PSF, masking, units)
+│   # per-detector (KHT)
+└── kht-detect.md     # the KHTDetectTask streak detector: config, I/O, convention
 ```
 
 - **`INDEX.md` is the entry point.** It holds one line per note:
@@ -264,7 +282,7 @@ precision**. Follow these guidelines:
 
 ### Maintenance
 
-- Re-verify `adrt-api.md` / `adrt-geometry.md` whenever the installed `adrt`
-  version changes.
+- Re-verify a detector's backend note (e.g. `adrt-api.md`) whenever that
+  backend's installed version changes.
 - Treat `INDEX.md` as the source of truth for what exists; keep it in sync when
   adding, splitting, or deleting notes.

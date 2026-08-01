@@ -9,7 +9,7 @@ Empirically compare the streak lines produced by the new
 `lsst.meas.algorithms.maskStreaks.MaskStreaksTask`, on the **same** input image,
 to confirm that the reformulation preserves detection behavior and to quantify
 any residual discrepancy. The ranked, code-derived hypotheses for *why* they can
-differ are in `KHT_MASKSTREAKS_DISCREPANCY.md`; this plan is how we would
+differ are in `maskstreaks-discrepancy.md`; this plan is how we would
 measure them.
 
 **Constraint (from the task):** do **not** run a full pipeline / `PipelineTask`.
@@ -105,7 +105,7 @@ To compare fairly, convert **both** outputs into the same representation:
 - **Per-match residuals:** `|Δrho|` (pixels), `|Δtheta|` (deg), and `Δlength`
   (KHTDetectTask segment length vs. the reference line clipped to the same bbox).
 - **Unmatched lines** on each side, with which discrepancy hypothesis
-  (`KHT_MASKSTREAKS_DISCREPANCY.md`) most plausibly explains each.
+  (`maskstreaks-discrepancy.md`) most plausibly explains each.
 - **Determinism control:** run the KMeans-based clustering ≥3× (fixed input) to
   separate genuine code differences from KMeans random-init jitter (§4 there).
 
@@ -120,7 +120,7 @@ To compare fairly, convert **both** outputs into the same representation:
 ## Deliverable
 
 A short results table (counts, residual distributions) appended to
-`KHT_MASKSTREAKS_DISCREPANCY.md`, confirming or re-ranking the hypotheses there.
+`maskstreaks-discrepancy.md`, confirming or re-ranking the hypotheses there.
 
 ---
 **Next action:** reviewer confirms the input source (A/B) and provides any real

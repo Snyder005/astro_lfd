@@ -9,7 +9,7 @@ on synthetic testdata and two real diffims (visit `2025071700631` det 140/136)
 against the LSST stack `lsst-scipipe-13.0.0`, 2026-07-07. The task is
 **validated against `MaskStreaksTask`**: jointly-detected lines agree to exactly
 0 in rho/theta once the two fixes below are in place (see
-`docs/KHT_MASKSTREAKS_DISCREPANCY.md` "Empirical results" and the harness
+`docs/detectors/kht/maskstreaks-discrepancy.md` "Empirical results" and the harness
 `scripts/kht_maskstreaks_compare.py`).
 
 ## What it is
@@ -17,8 +17,9 @@ against the LSST stack `lsst-scipipe-13.0.0`, 2026-07-07. The task is
 `astro_lfd.meas.detectStreaks.KHTDetectTask` (a `pipeBase.Task`, **not** a
 PipelineTask) ports the MixCOATL `detectStreaks` prototype. It reproduces the
 detection stages of `MaskStreaksTask` but emits a `SourceCatalog` of line
-segments instead of a `STREAK` mask plane. It is the template for future
-`astro_lfd` detectors (incl. the ADRT one).
+segments instead of a `STREAK` mask plane. It is the **validated reference
+implementation** of the shared LFD detector-task template
+([detector-task](detector-task.md)) that other detectors (e.g. ADRT) reuse.
 
 Pipeline: `DETECTED` plane → Canny edges (`skimage`, `sigma=0.1`,
 `use_quantiles`) → remove invalid (dilated bad planes + dilated SAT∩DETECTED) →
@@ -75,4 +76,4 @@ hard dependence on an attached detector. `Line2D` also **canonicalizes** theta t
   ADRT detector inherits the same weight-masking rule.
 
 **See also:** [geom-line](geom-line.md), [detector-task](detector-task.md),
-`docs/KHT_MASKSTREAKS_DISCREPANCY.md`
+`docs/detectors/kht/maskstreaks-discrepancy.md`

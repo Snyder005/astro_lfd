@@ -2,7 +2,7 @@
 
 **Purpose:** everything a future session needs to build and run the comparison
 harness, without re-deriving the state of this work. Pairs with
-`KHT_MASKSTREAKS_TESTPLAN.md` (what to run) and `KHT_MASKSTREAKS_DISCREPANCY.md`
+`maskstreaks-testplan.md` (what to run) and `maskstreaks-discrepancy.md`
 (why they can differ). Written 2026-07-06.
 
 ## Where the work stands
@@ -23,7 +23,7 @@ contain the task code.
 
 ## The one blocking decision (needs the reviewer)
 
-`KHT_MASKSTREAKS_TESTPLAN.md` → "Inputs required" asks which input source to use.
+`maskstreaks-testplan.md` → "Inputs required" asks which input source to use.
 Nothing was chosen yet. The options:
 
 - **(A) Extend `astro_lfd.utils.testdata`** to also emit a `DETECTED` mask plane
@@ -80,6 +80,6 @@ These are already established from reading both sources; trust them:
 ## Deliverable on completion
 
 Append a results table (counts, matched/unmatched, `Δrho`/`Δtheta`/`Δlength`
-distributions, KMeans jitter floor) to `KHT_MASKSTREAKS_DISCREPANCY.md`,
+distributions, KMeans jitter floor) to `maskstreaks-discrepancy.md`,
 confirming or re-ranking its hypotheses. Do this on a fresh branch (e.g.
 `feature/kht-maskstreaks-validation`) once inputs are approved.
