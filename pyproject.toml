@@ -5,17 +5,29 @@ build-backend = "hatchling.build"
 [project]
 name = "astro_lfd"
 version = "0.0.1"
-description = "Linear Feature Detection for LSST Camera images using the ADRT."
+description = "Linear Feature Detection for LSST Camera images."
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
     "numpy",
     "scipy",
-    "adrt>=1.2.0",
 ]
 
 [project.optional-dependencies]
+# Each linear-feature detector pulls in its own backend as an optional extra so
+# the core stays free of detector-specific dependencies. Shared scientific deps
+# (numpy, scipy) live in the core above; only detector-specific packages go here.
+#
+# NOTE: some detector code targets the LSST Science Pipelines stack and imports
+# stack-only modules that are NOT pip-installable (KHT's `lsst.kht`, `lsst.afw`,
+# `lsst.pipe.base`, `lsst.meas.algorithms`). Those come from the stack, not these
+# extras. The extras cover only the parts installable on top of any environment,
+# so early numpy-level work (e.g. `utils.testdata` + a transform backend) can run
+# in a plain venv; the full task form additionally requires the stack.
+adrt = ["adrt>=1.2.0"]                    # ADRT detector backend (line-integral transform)
+kht = ["scikit-image", "scikit-learn"]    # KHT detector: Canny edges + line clustering
 dev = ["black", "mypy", "pytest"]
+all = ["astro_lfd[adrt,kht,dev]"]         # every detector backend + dev tools
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/astro_lfd"]

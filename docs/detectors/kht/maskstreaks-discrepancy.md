@@ -4,7 +4,7 @@
 **Method:** static side-by-side reading of
 `astro_lfd.meas.detectStreaks.KHTDetectTask` and
 `lsst.meas.algorithms.maskStreaks.MaskStreaksTask` (upstream `main`). No full
-task run — empirical confirmation is deferred to `KHT_MASKSTREAKS_TESTPLAN.md`.
+task run — empirical confirmation is deferred to `maskstreaks-testplan.md`.
 
 ## Scope and framing
 
@@ -156,7 +156,7 @@ of jointly-accepted lines is unaffected.
 jointly-detected streaks once #1 and #2 are reconciled; the remaining
 differences (#3–#6) affect *which* streaks appear and *what metadata* is carried,
 not the fitted line of a shared detection. Empirical confirmation follows the
-harness in `KHT_MASKSTREAKS_TESTPLAN.md`.
+harness in `maskstreaks-testplan.md`.
 
 ---
 

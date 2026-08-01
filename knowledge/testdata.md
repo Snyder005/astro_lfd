@@ -1,8 +1,9 @@
 # Synthetic test images (`astro_lfd.utils.testdata`)
 
-**When relevant:** generating LFD test images, or feeding their planes into the
-ADRT detector — what arrays exist, their shapes/dtypes/units, and how they map
-to the detector's expected input.
+**When relevant:** generating LFD test images, or feeding their planes into a
+detector — what arrays exist, their shapes/dtypes/units, and how they map
+to a detector's expected input. (Detector-agnostic; ADRT's pow2-square
+requirement is called out as a scoped aside.)
 
 **Verified:** `pytest tests/test_testdata.py` (15 passed) against numpy 2.2.6,
 scipy 1.16.3, astropy 7.2.0, `lsst.afw.image` present, on 2026-07-03.
@@ -20,33 +21,40 @@ difference image.
 | `mask` | `int32` | bitmask | `0` = good. afw bit convention (`BAD`=bit0, …). Starts empty. |
 
 Shape is `(ny, nx)`, default `(4004, 4096)` = LSST Camera science sensor
-(rows × cols). These map to the LFD design inputs `D` (image), `V` (variance),
-`M` (mask) in `docs/LFD_DESIGN.md` §3.
+(rows × cols). These map to the shared LFD inputs `D` (image), `V` (variance),
+`M` (mask) in `docs/LFD_DESIGN.md` §2.
 
-## Array-input contract for the ADRT detector — READ THIS
+## Array-input contract for a detector — READ THIS
 
-The ADRT (`knowledge/adrt-api.md`) requires **square, power-of-two, float**
-input. The test images are **neither square nor power-of-two** (4004×4096), so
-the detector front-end MUST pad/tile before `adrt.adrt()`:
+Facts common to every detector:
 
-- Default `(4004, 4096)` → pad to `(8192, 8192)` (next pow2 square) with
-  `numpy.pad(..., constant_values=0)`; record pad offsets to map coordinates
-  back (docs/LFD_DESIGN §Step 0). 0-pad is safe: zeros add nothing to line sums.
-- For fast unit tests / experiments, pass `shape=(256,256)` (or any pow2
-  square) to `simulate_exposure` so output is ADRT-ready with no padding.
-- The detector transforms the **significance image `S = D/√V`**, not the raw
-  image. Unit conversion via `calib` is **invariant** under `S` (image → D/c,
-  variance → V/c², so D/√V unchanged) — so the output `unit`/`calib` does NOT
-  affect detection, only output realism/compatibility. Don't "fix" units to
-  chase detection changes; there are none.
-- `float32` planes: cast to `float64`/`float32` as the ADRT expects float; fine
-  as-is. Poisson/normal draws are done in electrons then divided by `calib`.
-- **`mask` starts empty** — but the detector tasks need a `DETECTED` plane as the
-  seed ([detector-task](detector-task.md)). Set it by thresholding the
-  *noise-free* `streak_signal` at N·sigma, e.g. (as in the comparison harness
+- The detector operates on detected/significant pixels, but **`mask` starts
+  empty** — the detector tasks need a `DETECTED` plane as the seed
+  ([detector-task](detector-task.md)). Set it by thresholding the *noise-free*
+  `streak_signal` at N·sigma, e.g. (as in the comparison harness
   `scripts/kht_maskstreaks_compare.py`):
   `detected = streak_signal(...) > 5*sqrt(read_noise**2 + sky + signal)`, then
   `exposure.mask.array[detected] |= mask.getPlaneBitMask("DETECTED")`.
+- Detectors that transform the **significance image `S = D/√V`** (rather than the
+  raw image) are insensitive to unit choice: `calib` is **invariant** under `S`
+  (image → D/c, variance → V/c², so D/√V unchanged), so the output `unit`/`calib`
+  does NOT affect detection, only output realism/compatibility. Don't "fix" units
+  to chase detection changes; there are none.
+- `float32` planes: cast to float as a numpy-level core expects; fine as-is.
+  Poisson/normal draws are done in electrons then divided by `calib`.
+
+**ADRT-specific aside — pow2-square padding.** The ADRT
+(`knowledge/adrt-api.md`) additionally requires **square, power-of-two, float**
+input. The test images are **neither square nor power-of-two** (4004×4096), so
+the ADRT front-end MUST pad/tile before `adrt.adrt()`:
+
+- Default `(4004, 4096)` → pad to `(8192, 8192)` (next pow2 square) with
+  `numpy.pad(..., constant_values=0)`; record pad offsets to map coordinates
+  back (`docs/detectors/adrt/design.md` §Step 0). 0-pad is safe: zeros add
+  nothing to line sums.
+- For fast unit tests / experiments, pass `shape=(256,256)` (or any pow2
+  square) to `simulate_exposure` so output is ADRT-ready with no padding.
+- The default shape is NOT ADRT-ready; KHT has no such constraint.
 
 ## Units (the notebook's open issue, resolved)
 
@@ -80,4 +88,6 @@ small = td.simulate_exposure(td.StreakConfig(rho=128.0), shape=(256, 256), seed=
 - `save_npz` uses `allow_pickle=False`; `meta` is stored as its `repr` and
   restored with `ast.literal_eval` (safe, no pickle).
 
-**See also:** [adrt-api](adrt-api.md), [LFD design](../docs/LFD_DESIGN.md)
+**See also:** [detector-task](detector-task.md), [adrt-api](adrt-api.md),
+[LFD design](../docs/LFD_DESIGN.md),
+ADRT specifics `../docs/detectors/adrt/design.md`
