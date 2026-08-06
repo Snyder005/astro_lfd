@@ -162,7 +162,8 @@ line-by-line algorithm comparison.
    speed.
 
 7. **Maintenance fragility.** `pyhough_lib.py` uses `np.bool` (removed in
-   NumPy ≥ 1.24; the environment pins 1.23.5), and `simple_streak_finder.py`
+   NumPy ≥ 1.24; the current stack ships numpy 2.2.6, so this **will** raise
+   `AttributeError`), and `simple_streak_finder.py`
    references an undefined `im` (should be `exposure`) at the `summaryStats`
    lookup.
    *Reasoning:* not architectural, but it signals the code is unmaintained and
