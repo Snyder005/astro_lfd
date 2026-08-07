@@ -1,3 +1,3 @@
-from .detectStreaks import KHTDetectConfig, KHTDetectTask
+from .khtDetect import KHTDetectConfig, KHTDetectTask
 
 __all__ = ["KHTDetectConfig", "KHTDetectTask"]

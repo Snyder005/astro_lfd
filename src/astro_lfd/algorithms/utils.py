@@ -1,13 +1,20 @@
+from collections.abc import Callable
 from functools import wraps
 from time import perf_counter
+from typing import Concatenate, ParamSpec, TypeVar
 
 from numpy.typing import NDArray
 from scipy.ndimage import distance_transform_edt
+import numpy as np
 
 import lsst.afw.image as afwImage
 
-
 __all__ = ["get_pixel_mask", "binary_dilation", "timed"]
+
+
+P = ParamSpec("P")
+R = TypeVar("R")
+S = TypeVar("S")
 
 
 def get_pixel_mask(mask: afwImage.Mask, mask_plane: str | list[str]) -> NDArray[np.bool_]:
@@ -47,22 +54,18 @@ def binary_dilation(binary_image: NDArray[np.bool_], npix_to_dilate: int) -> NDA
 
 
 def timed(step: str):
-    def decorator(func):
+    def decorator[**P, R](
+        func: Callable[Concatenate[S, P], R],
+    ) -> Callable[Concatenate[S, P], R]:
         @wraps(func)
-        def wrapper(self, *args, **kwargs):
+        def wrapper(self: S, *args: P.args, **kwargs: P.kwargs) -> R:
             t0 = perf_counter()
             try:
                 return func(self, *args, **kwargs)
             finally:
                 dt = perf_counter() - t0
-
-                if not hasattr(self, "timings"):
-                    self.timings = {}
-
                 self.timings[step] = dt
 
-                if hasattr(self, "log"):
-                    self.log.info("%s took %.3f s", stage, dt)
-
         return wrapper
+
     return decorator
