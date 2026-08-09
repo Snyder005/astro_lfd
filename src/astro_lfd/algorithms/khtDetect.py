@@ -22,11 +22,12 @@ the two tasks.  This module is intended as the template for future
 
 from __future__ import annotations
 
-import numpy as np
 from numpy.typing import NDArray
 from skimage.feature import canny
 from sklearn.cluster import KMeans
+import numpy as np
 
+from lsst.meas.algorithms.maskStreaks import Line, LineCollection, LineProfile 
 import lsst.afw.detection as afwDetect
 import lsst.afw.geom as afwGeom
 import lsst.afw.image as afwImage
@@ -35,7 +36,6 @@ import lsst.geom as geom
 import lsst.kht
 import lsst.pex.config as pexConfig
 import lsst.pipe.base as pipeBase
-from lsst.meas.algorithms.maskStreaks import Line, LineCollection, LineProfile  # Old implementation
 
 from .utils import binary_dilation, get_pixel_mask, timed 
 from ..geom.line import Line2D
@@ -185,7 +185,7 @@ class KHTDetectTask(pipeBase.Task):
         self.timings = {}
         edges, bad_mask, detected_mask = self.preprocess(exposure.mask)
         lines = self.detect(edges)
-        self.postprocess(streaks, lines, exposure, bad_mask=bad_mask, detected_mask=detected_mask)
+        self.postprocess(streaks, exposure, lines=lines, bad_mask=bad_mask, detected_mask=detected_mask)
 
         return pipeBase.Struct(streaks=streaks, edges=edges, timings=self.timings)
 
@@ -233,9 +233,9 @@ class KHTDetectTask(pipeBase.Task):
     def postprocess(
         self,
         streaks: afwTable.SourceTable,
-        lines: LineCollection,
         exposure: afwImage.ExposureF,
         *,
+        lines: LineCollection,
         bad_mask: NDArray[np.bool_],
         detected_mask: NDArray[np.bool_],
     ):
@@ -258,6 +258,7 @@ class KHTDetectTask(pipeBase.Task):
         # keeps the frame consistent with the fitted image array and avoids a
         # hard dependence on the detector being attached.
         box = exposure.getBBox()
+        wcs = exposure.getWcs()
         shift = geom.Extent2D(box.getCenter())
         for rho, theta in np.nditer((rhos, thetas)):
             line = Line(float(rho), float(theta), sigma=self.config.inv_sigma**-1)
@@ -296,7 +297,7 @@ class KHTDetectTask(pipeBase.Task):
             streak = StreakAdapter(streaks.addNew())
             streak.setLineSegment(line_segment)
             streak.setFootprint(footprint)
-            if (wcs := exposure.getWcs()) is not None:
+            if wcs is not None:
                 streak.setCoord(wcs.pixelToSky(center))
             streak["line_center_x"] = center.getX()
             streak["line_center_y"] = center.getY()

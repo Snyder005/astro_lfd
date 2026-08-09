@@ -1,16 +1,26 @@
+from numpy.typing import NDArray
 from scipy import ndimage
 from scipy.stats import median_abs_deviation
+from skimage.transform import hough_line, hough_line_peaks
 import numpy as np
+import warnings
 
 import lsst.afw.image as afwImage
+import lsst.afw.math as afwMath
 import lsst.afw.table as afwTable
+import lsst.geom as geom
 import lsst.pex.config as pexConfig
 import lsst.pipe.base as pipeBase
-import pyhough
+
+from .utils import get_pixel_mask, timed
+from ..geom.line import Line2D
+from ..table.streakAdapter import StreakAdapter
+
+__all__ = ["SHTDetectConfig", "SHTDetectTask"]
+
 
 class SHTDetectConfig(pexConfig.Config):
     """Configurable parameters for `SHTDetectTask`."""
-
 
     # Configuration for pixel masking
     bad_mask_planes = pexConfig.ListField(
@@ -26,12 +36,12 @@ class SHTDetectConfig(pexConfig.Config):
     )
 
     # Configuration for SHT
-    nsig_det = pexConfig.Field(
+    nsigma = pexConfig.Field(
         doc="Number of sigma above binned background to search for streaks.",
         dtype=float,
         default=1.0,
     )
-    nsig_streak = pexConfig.Field(
+    nsigma_streak = pexConfig.Field(
         doc="Number of sigma to record the streak.",
         dtype=float,
         default=5.0,
@@ -82,90 +92,85 @@ class SHTDetectTask(pipeBase.Task):
         """
         streaks = afwTable.SourceCatalog(table)
 
-        det, bad_mask = self.preprocess(exposure)
-        rhos, thetas = self.detect(det, bad_mask)
-        self.postprocess(streaks, exposure, rhos, thetas)
+        self.timings = {}
+        detected_mask, bad_mask = self.preprocess(exposure)
+        rhos, thetas = self.detect(detected_mask, bad_mask)
+        self.postprocess(streaks, exposure, rhos=rhos, thetas=thetas)
 
         return pipeBase.Struct(streaks=streaks, timings=self.timings)
 
     @timed("preprocess")
-    def preprocess():
-        bad_mask = get_pixel_mask(mask, list(self.config.bad_mask_planes))
+    def preprocess(self, exposure: afwImage.ExposureF) -> tuple[NDArray[np.bool_], NDArray[np.bool_]]:
+        mi = afwMath.binImage(exposure.maskedImage, self.config.binning)
+        bad_mask = get_pixel_mask(mi.mask, self.config.bad_mask_planes)
 
         sky_noise = None
-        if (info := exposure.getInfo()) is not None: # check that exposure has method
-            if (stats := exposure.getSummaryStats()) is not None: # check that exposure has method
+        if (info := exposure.getInfo()) is not None:
+            if (stats := info.getSummaryStats()) is not None:
                 if np.isfinite(stats.skyNoise):
                     sky_noise = stats.skyNoise
 
-        if sky_noise is None:
-            sky_noise = median_abs_deviation(
-                exposure.image.array[(exposure.mask.array & bad_mask) == 0].ravel(),
+        if sky_noise is not None:
+            detection_noise = sky_noise / self.config.binning
+        else:
+            detection_noise = median_abs_deviation(
+                mi.image.array[~bad_mask].ravel(),
                 scale="normal",
             )
 
-        binned = afwMath.binImage(exposure.maskedImage, binning)
-        binned_noise = sky_noise / binning
+        detected_mask = mi.image.array > (self.config.nsigma * detection_noise)
+        detected_mask[bad_mask] = False
 
-        det = (binned.image.array > (nsig_det * binned_noise))
-        det[(binned.mask.array & bad_mask) > 0] = False
-
-        return det, bad_mask
+        return detected_mask, bad_mask
 
     @timed("detect")
-    def detect(det, bad_mask):
+    def detect(
+        self,
+        detected_mask: NDArray[np.bool_],
+        bad_mask: NDArray[np.bool_],
+    ) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
 
-        hough = pyhough.Hough(det)
-        transform = hough.transform()
+        tested_angles = np.linspace(0.0, np.pi, 360, endpoint=False)
+        hspace, angles, distances = hough_line(detected_mask, theta=tested_angles)
 
-        det_template = np.ones_like(det)
-        det_template[(binned.mask.array & bad_mask) > 0] = False
-        hough_template = pyhough.Hough(det_template)
-        transform_template = hough_template.transform()
-        ratio = transform[0] / transform_template[0]
+        detected_mask_template = ~bad_mask
+        hspace_template, _, _ = hough_line(detected_mask_template, theta=tested_angles)
 
-        r_use = np.isfinite(ratio)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            ratio = hspace / hspace_template
 
-        med = np.median(ratio[r_use])
-        sig = median_abs_deviation(ratio[r_use].ravel(), scale="normal")
-
-        high_bool = (ratio > (med + nsig_streak * sig)) & (transform_template[0] > min_streak_length / binning)
-
-        labeled, n = ndimage.label(high_bool)
-        counts = np.bincount(labeled.ravel())
-        keep = np.where(counts[1:] >= min_cluster_size)[0] + 1
-
-        thetas = np.zeros(len(keep))
-        rhos = np.zeros(len(keep))
-
-        for i, label in enumerate(keep):
-            ys, xs = np.where(labeled == label)
-
-            thetas[i] = np.rad2deg(np.median(transform[1][xs]))
-            rhos[i] = np.median(transform[2][ys]) * binning
+        ratio[~np.isfinite(ratio)] = 0.0
+        peaks, thetas, rhos = hough_line_peaks(ratio, angles, distances)
 
         return rhos, thetas
 
     @timed("postprocess")
-    def postprocess(self, streaks, exposure, rhos, thetas):
+    def postprocess(
+        self,
+        streaks: afwTable.SourceTable,
+        exposure: afwImage.ExposureF,
+        *,
+        rhos: NDArray[np.float64],
+        thetas: NDArray[np.float64],
+    ):
+
         box = exposure.getBBox()
-        shift = geom.Extent2D(box.getCenter())
+        wcs = exposure.getWcs()
+        print(rhos, thetas)
         for rho, theta in np.nditer((rhos, thetas)):
-            line = Line2D(rho, theta * geom.degrees)
+            line = Line2D(rho * self.config.binning, theta * geom.radians)
             line_segment = line.intersection(box)
             if line_segment is None:
                 continue
-            center = line_segment.center
-
-#            footprint_mask = afwImage.Mask(final_line_mask.astype(np.int32))
-#            spans = afwGeom.SpanSet.fromMask(footprint_mask)
-#            footprint = afwDetect.Footprint(spans)
 
             streak = StreakAdapter(streaks.addNew())
             streak.setLineSegment(line_segment)
-            if (wcs := exposure.getWcs()) is not None:
+
+            center = line_segment.center
+            if wcs is not None:
                 streak.setCoord(wcs.pixelToSky(center))
             streak["line_center_x"] = center.getX()
             streak["line_center_y"] = center.getY()
 
-        self.log.info("Accepted %d streak(s) after profile fitting", len(streaks))
+        self.log.info("Accepted %d streak(s)", len(streaks))
