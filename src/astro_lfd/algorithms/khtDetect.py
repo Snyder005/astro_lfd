@@ -25,19 +25,21 @@ from __future__ import annotations
 from numpy.typing import NDArray
 from skimage.feature import canny
 from sklearn.cluster import KMeans
+import math
 import numpy as np
 
-from lsst.meas.algorithms.maskStreaks import Line, LineCollection, LineProfile 
+from lsst.meas.algorithms.maskStreaks import Line, LineCollection, LineProfile
 import lsst.afw.detection as afwDetect
 import lsst.afw.geom as afwGeom
 import lsst.afw.image as afwImage
+import lsst.afw.math as afwMath
 import lsst.afw.table as afwTable
 import lsst.geom as geom
 import lsst.kht
 import lsst.pex.config as pexConfig
 import lsst.pipe.base as pipeBase
 
-from .utils import binary_dilation, get_pixel_mask, timed 
+from .utils import binary_dilation, get_pixel_mask, timed
 from ..geom.line import Line2D
 from ..table.streakAdapter import StreakAdapter
 
@@ -62,6 +64,11 @@ class KHTDetectConfig(pexConfig.Config):
         doc="Number of pixels to dilate the saturated detections mask.",
         dtype=int,
         default=250,
+    )
+    bin_size = pexConfig.Field(
+        doc="Pixel bin size for input image.",
+        dtype=int,
+        default=1,
     )
 
     # Configuration for KHT.
@@ -155,7 +162,7 @@ class KHTDetectTask(pipeBase.Task):
     _DefaultName = "khtDetect"
 
     timings: dict[str, float]
-    
+
     def run(self, table: afwTable.SourceTable, exposure: afwImage.ExposureF) -> pipeBase.Struct:
         """Detect streaks in an exposure.
 
@@ -177,57 +184,72 @@ class KHTDetectTask(pipeBase.Task):
             ``streaks``
                 Catalog of detected streaks (`lsst.afw.table.SourceCatalog`).
             ``edges``
-                Boolean Canny edge image used for line finding, with invalid 
-                regions removed (`numpy.ndarray`).
+                Binary Canny edge image with invalid regions masked
+                (`numpy.ndarray`).
+            ``timings``
+                Computing times for each processing step (`dict`)
         """
         streaks = afwTable.SourceCatalog(table)
-
         self.timings = {}
-        edges, bad_mask, detected_mask = self.preprocess(exposure.mask)
-        lines = self.detect(edges)
-        self.postprocess(streaks, exposure, lines=lines, bad_mask=bad_mask, detected_mask=detected_mask)
+        edges = self.preprocess(exposure)
+        rhos, thetas = self.detect(edges)
+        self.postprocess(streaks, exposure, rhos=rhos, thetas=thetas)
 
         return pipeBase.Struct(streaks=streaks, edges=edges, timings=self.timings)
 
     @timed("preprocess")
     def preprocess(
         self,
-        mask: afwImage.Mask,
-    ) -> tuple[NDArray[np.bool_], NDArray[np.bool_], NDArray[np.bool_]]:
-        # Calculate the Canny edge response of the detected pixels.
-        detected_mask = get_pixel_mask(mask, self.config.detected_mask_plane)
+        exposure: afwImage.ExposureF,
+    ) -> NDArray[np.bool_]:
+        """Perform preprocessing on input exposure.
+
+        Parameters
+        ----------
+        exposure: `lsst.afw.image.ExposureF`
+            Exposure to search. The mask plane named by
+            ``config.detected_mask_plane`` must flag the detected pixels.
+
+        Returns
+        -------
+        edges : `numpy.ndarray`
+            Binary Canny edge image with invalid regions masked
+            (`numpy.ndarray`).
+        """
+        mi = afwMath.binImage(exposure.maskedImage, self.config.bin_size)
+        detected_mask = get_pixel_mask(mi.mask, self.config.detected_mask_plane)
+        bad_mask = get_pixel_mask(mi.mask, self.config.bad_mask_planes)
         init_edges = canny(detected_mask.astype(np.float64), use_quantiles=True, sigma=0.1)
 
-        bad_mask = get_pixel_mask(mask, list(self.config.bad_mask_planes))
-        dilated_bad_mask = binary_dilation(bad_mask, 1)
+        dilated_bad_mask = binary_dilation(bad_mask, 1) if self.config.bin_size == 1 else bad_mask
         if self.config.saturated_detections_dilation:
-            sat_mask = get_pixel_mask(mask, "SAT")
+            sat_mask = get_pixel_mask(mi.mask, "SAT")
             sat_detected_mask = binary_dilation(
                 sat_mask & detected_mask,
-                self.config.saturated_detections_dilation,
+                math.floor(self.config.saturated_detections_dilation / self.config.bin_size),
             )
             invalid = sat_detected_mask | dilated_bad_mask
         else:
             invalid = dilated_bad_mask
-        edges = init_edges & ~invalid
 
-        return edges, bad_mask, detected_mask
+        edges = init_edges & ~invalid
+        return edges
 
     @timed("detect")
-    def detect(self, edges: NDArray) -> LineCollection:
-        # Run the Kernel Hough Transform on the edge image.
+    def detect(self, edges: NDArray[np.bool_]) -> tuple(NDArray[np.float64], NDArray[np.float64]):
+        """Perform linear feature detection."""
         lines = lsst.kht.find_lines(
             edges,
-            self.config.cluster_minimum_size,
-            self.config.cluster_minimum_deviation,
+            math.floor(self.config.cluster_minimum_size / self.config.bin_size),
+            self.config.cluster_minimum_deviation / self.config.bin_size,
             self.config.delta,
             self.config.minimum_kernel_height,
             self.config.nsigma,
-            self.config.abs_minimum_kernel_height,
+            self.config.abs_minimum_kernel_height / self.config.bin_size**2,
         )
 
         self.log.info("The Kernel Hough Transform detected %d line(s)", lines.size)
-        return lines
+        return lines.rho * self.config.bin_size, lines.theta
 
     @timed("postprocess")
     def postprocess(
@@ -235,14 +257,17 @@ class KHTDetectTask(pipeBase.Task):
         streaks: afwTable.SourceTable,
         exposure: afwImage.ExposureF,
         *,
-        lines: LineCollection,
-        bad_mask: NDArray[np.bool_],
-        detected_mask: NDArray[np.bool_],
+        rhos: NDArray[np.float64],
+        thetas: NDArray[np.float64],
     ):
-        if lines.size == 0:
+        """Perform postprocessing of detected linear features."""
+        if rhos.size == 0:
             return pipeBase.Struct(streaks=streaks)
 
-        rhos, thetas = self._cluster_lines(lines.rho, lines.theta)
+        rhos, thetas = self._cluster_lines(rhos, thetas)
+
+        bad_mask = get_pixel_mask(exposure.mask, self.config.bad_mask_planes)
+        detected_mask = get_pixel_mask(exposure.mask, self.config.detected_mask_plane)
 
         # Build fit weights: inverse variance, with invalid pixels zeroed.
         # Zero on the undilated bad planes (not the one-pixel-dilated edge
