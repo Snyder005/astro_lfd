@@ -11,34 +11,10 @@ from numpy.typing import ArrayLike, NDArray
 import lsst.geom as geom
 
 __all__ = [
-    "LineFitResult",
     "Line2D",
+    "LineGeometry2D",
     "LineSegment2D",
-    "fit_line_segment_from_xy",
-    "embed_rho_theta",
 ]
-
-
-@dataclass
-class LineFitResult:
-    """The results of a line segment fit from x/y points.
-
-    Attributes
-    ----------
-    line_segment : `LineSegment2D`
-        The best-fit line segment.
-    rms : `float`
-        The weighted perpendicular RMS from the line segment fit.
-    width : `float`
-        The estimated width.
-    aspect_ratio : `float`
-        The length divided by the estimated width.
-    """
-
-    line_segment: LineSegment2D
-    rms: float
-    width: float
-    aspect_ratio: float
 
 
 class LineGeometry2D(ABC):
@@ -59,7 +35,7 @@ class LineGeometry2D(ABC):
 
         Returns
         -------
-        line_geom : `astro_lfd.geom.line.LineGeometry2D`
+        line_geom : `astro_lfd.geom.LineGeometry2D`
             The line geometry defined by the two points.
         """
         ...
@@ -111,7 +87,7 @@ class LineGeometry2D(ABC):
         ...
 
     def clipped_to(self, box: geom.Box2D | geom.Box2I) -> LineSegment2D | None:
-        """Clip line geometry to a box.
+        """Return the portion of the line geometry inside a box.
 
         Parameters
         ----------
@@ -121,7 +97,8 @@ class LineGeometry2D(ABC):
         Returns
         -------
         line_segment : `astro_lfd.geom.LineSegment2D`
-            The segment of the line geometry clipped to the box.
+            The portion of the line geometry inside the box, or `None` if the
+            geometry does not intersect the box.
         """
         interval = self._interval_in_box(box)
         if interval is None:
@@ -129,23 +106,8 @@ class LineGeometry2D(ABC):
 
         return LineSegment2D(self.as_line(), interval=interval)
 
-    def intersection(self, box: geom.Box2D | geom.Box2I) -> LineSegment2D | None:
-        """Return the intersection with a box.
-
-        Parameters
-        ----------
-        box : `lsst.geom.Box2I` or `lsst.geom.Box2D`
-            The box to intersect the line geometry with.
-
-        Returns
-        -------
-        line_segment : `astro_lfd.geom.LineSegment2D`
-            The segment of the line geometry that intersects the box.
-        """
-        return self.clipped_to(box)
-
     @abstractmethod
-    def intersections_with_box_edges(
+    def boundary_intersections(
         self,
         box: geom.Box2I | geom.Box2D,
         atol: float = 1e-12,
@@ -167,36 +129,6 @@ class LineGeometry2D(ABC):
         """
         ...
 
-    def rotated(self, angle: geom.Angle) -> Self:
-        """Apply a rotational transformation.
-
-        Parameters
-        ----------
-        angle : `lsst.geom.Angle`
-            The angle to rotate by.
-
-        Returns
-        -------
-        transformed : `astro_lfd.geom.line.LineGeometry2D`
-            The transformed line geometry.
-        """
-        return self.transformed(geom.AffineTransform.makeRotation(angle))
-
-    def scaled(self, factor: float) -> Self:
-        """Apply a scaling transformation.
-
-        Parameters
-        ----------
-        factor : `float`
-            The factor to scale by.
-
-        Returns
-        -------
-        transformed : `astro_lfd.geom.line.LineGeometry2D`
-            The transformed line geometry.
-        """
-        return self.transformed(geom.AffineTransform.makeScaling(factor))
-
     def transformed(self, transform: Any) -> Self:
         """Apply a geometric transformation.
 
@@ -212,7 +144,7 @@ class LineGeometry2D(ABC):
 
         Returns
         -------
-        transformed : `astro_lfd.geom.line.LineGeometry2D`
+        transformed : `astro_lfd.geom.LineGeometry2D`
             A new line geometry in the target coordinate system.
         """
         p0, p1 = self._defining_points()
@@ -221,6 +153,36 @@ class LineGeometry2D(ABC):
         p1_t = _apply_transform(transform, p1)
 
         return type(self).from_points(p0_t, p1_t)
+
+    def rotated(self, angle: geom.Angle) -> Self:
+        """Apply a rotational transformation.
+
+        Parameters
+        ----------
+        angle : `lsst.geom.Angle`
+            The angle to rotate by.
+
+        Returns
+        -------
+        transformed : `astro_lfd.geom.LineGeometry2D`
+            The transformed line geometry.
+        """
+        return self.transformed(geom.AffineTransform.makeRotation(angle))
+
+    def scaled(self, factor: float) -> Self:
+        """Apply a scaling transformation.
+
+        Parameters
+        ----------
+        factor : `float`
+            The factor to scale by.
+
+        Returns
+        -------
+        transformed : `astro_lfd.geom.LineGeometry2D`
+            The transformed line geometry.
+        """
+        return self.transformed(geom.AffineTransform.makeScaling(factor))
 
     def translated(self, offset: geom.Extent2D) -> Self:
         """Apply a translation transformation.
@@ -232,7 +194,7 @@ class LineGeometry2D(ABC):
 
         Returns
         -------
-        transformed : `astro_lfd.geom.line.LineGeometry2D`
+        transformed : `astro_lfd.geom.LineGeometry2D`
             The transformed line geometry.
         """
         return self.transformed(geom.AffineTransform.makeTranslation(offset))
@@ -375,6 +337,40 @@ class Line2D(LineGeometry2D):
         """
         return self.origin + self.direction * s
 
+    def along_coordinate(self, point: geom.Point2D) -> float:
+        """Return the signed coordinate along the line direction.
+
+        Parameters
+        ----------
+        point : `lsst.geom.Point2D`
+            Point to project along the line direction vector.
+
+        Returns
+        -------
+        s : `float`
+            The signed coordinate along the line direction relative to the
+            point closest to the origin.
+        """
+        delta = point - self.origin
+        return _dot(delta, self.direction)
+
+    def normal_coordinate(self, point: geom.Point2D) -> float:
+        """Return the signed coordinate along the line normal.
+
+        Parameters
+        ----------
+        point : `lsst.geom.Point2D`
+            Point to project along the line normal vector.
+
+        Returns
+        -------
+        r : `float`
+            The signed coordinate along the line normal relative to the point
+            closest to the origin.
+        """
+        delta = point - self.origin
+        return _dot(delta, self.normal)
+
     def contains(self, point: geom.Point2D, atol: float = 1e-12) -> bool:
         """Return `True` if point lies on the line geometry.
 
@@ -393,12 +389,26 @@ class Line2D(LineGeometry2D):
         """
         return abs(self.signed_distance(point)) <= atol
 
-    def intersections_with_box_edges(
+    def boundary_intersections(
         self,
         box: geom.Box2I | geom.Box2D,
         atol: float = 1e-12,
     ) -> list[geom.Point2D]:
-        """Return intersection points with box boundary."""
+        """Return the line geometry intersection points with a box boundary.
+
+        Parameters
+        ----------
+        box : `lsst.geom.Box2I` or `lsst.geom.Box2D`
+            The box boundary to intersect the line geometry with.
+        atol : `float`, optional
+            The minimum allowable difference, in pixels, of the direction
+            vector components from zero (1e-12, by default).
+
+        Returns
+        -------
+        points : `list` [`lsst.geom.Point2D`]
+            The list of boundary intersection points (empty, if none exist).
+        """
         o = self.origin
         d = self.direction
 
@@ -430,33 +440,29 @@ class Line2D(LineGeometry2D):
 
         return unique
 
-    def project(self, point: geom.Point2D) -> float:
-        """Project a point onto the line coordinate system.
-
-        Parameters
-        ----------
-        point : `lsst.geom.Point2D`
-            Point to project.
+    def _defining_points(self) -> tuple[geom.Point2D, geom.Point2D]:
+        """Return two points defining the line.
 
         Returns
         -------
-        s : `float`
-            The (signed) coordinate along the line direction relative to the
-            point closest to the origin.
+        p0, p1 : `lsst.geom.Point2D`
+            The two defining points.
         """
-        delta = point - self.origin
-        return _dot(delta, self.direction)
-
-    def signed_distance(self, point: geom.Point2D) -> float:
-        """Compute the signed perpendicular distance to the line."""
-        delta = point - self.origin
-        return _dot(delta, self.normal)
-
-    def _defining_points(self) -> tuple[geom.Point2D, geom.Point2D]:
-        """Return two points defining the line."""
         return self.origin, self.at(self._TRANSFORM_BASELINE)
 
     def _interval_in_box(self, box: geom.Box2I | geom.Box2D) -> geom.IntervalD | None:
+        """Return the valid parameter interval in a box boundary.
+
+        Parameters
+        ----------
+        box : `lsst.geom.Box2I` or `lsst.geom.Box2D`
+            The box boundary to constrain the line geometry interval within.
+
+        Returns
+        -------
+        interval : `lsst.geom.IntervalD`
+            The parameter interval in the box.
+        """
         return _line_box_interval(self, box)
 
 
@@ -595,77 +601,6 @@ def embed_rho_theta(
     embedded_points[:, 2] = dist_scale * rho
 
     return embedded_points
-
-
-def fit_line_segment_from_xy(x: ArrayLike, y: ArrayLike, weights: ArrayLike | None = None) -> LineFitResult:
-    """Fit a weighted line segment to 2D points.
-
-    Parameters
-    ----------
-    x, y : array-like
-        Point coordinates.
-    weights : array-like, optional
-        Non-negative point weights.
-
-    Returns
-    -------
-    result : `LineFitResult`
-        Best-fit finite line segment plus the fit residual, estimated width,
-        and aspect ratio.
-    """
-    x = np.asarray(x, dtype=np.float64)
-    y = np.asarray(y, dtype=np.float64)
-
-    if weights is None:
-        weights = np.ones_like(x, dtype=np.float64)
-    else:
-        weights = np.asarray(weights, dtype=np.float64)
-
-    if x.shape != y.shape:
-        raise ValueError("x and y must have the same shape")
-
-    if weights.shape != x.shape:
-        raise ValueError("weights must have same shape as x/y")
-
-    valid = np.isfinite(x) & np.isfinite(y) & np.isfinite(weights) & (weights > 0)
-    if np.count_nonzero(valid) < 2:
-        raise ValueError("need at least two valid weighted points")
-
-    x = x[valid]
-    y = y[valid]
-    w = weights[valid]
-
-    wsum = np.sum(w)
-    centroid = np.array([np.sum(w * x) / wsum, np.sum(w * y) / wsum], dtype=np.float64)
-
-    points = np.column_stack((x, y))
-    centered = points - centroid
-    weighted = centered * np.sqrt(w[:, np.newaxis])
-
-    _, _, vh = np.linalg.svd(weighted)
-    normal = vh[-1]
-    normal /= np.linalg.norm(normal)
-
-    rho = float(np.dot(centroid, normal))
-    theta = math.atan2(normal[1], normal[0])
-    line = Line2D(rho, theta * geom.radians)
-
-    sample_points = [geom.Point2D(float(px), float(py)) for px, py in points]
-    distances = np.array([line.signed_distance(p) for p in sample_points])
-    projections = [line.project(p) for p in sample_points]
-    interval = geom.IntervalD.fromSpannedPoints(projections)
-
-    line_segment = LineSegment2D(line=line, interval=interval)
-    rms = np.sqrt(np.average(np.array(distances) ** 2, weights=w))
-    width = 2.355 * rms
-    aspect_ratio = line_segment.length / width
-
-    return LineFitResult(
-        line_segment=line_segment,
-        rms=rms,
-        width=width,
-        aspect_ratio=aspect_ratio,
-    )
 
 
 def _apply_transform(transform: Any, point: geom.Point2D) -> geom.Point2D:
