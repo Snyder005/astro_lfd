@@ -622,12 +622,10 @@ class LineSegment2D(LineGeometry2D):
         points : `list` [`lsst.geom.Point2D`]
             The list of boundary intersection points (empty, if none exist).
         """
-        return [
-            p for p in self.line.boundary_intersections(box, atol=atol) if self.contains(p, atol=atol)
-        ]
+        return [p for p in self.line.boundary_intersections(box, atol=atol) if self.contains(p, atol=atol)]
 
     def _defining_points(self) -> tuple[geom.Point2D, geom.Point2D]:
-       """Return two points defining the line.
+        """Return two points defining the line.
 
         Returns
         -------
