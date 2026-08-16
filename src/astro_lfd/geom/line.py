@@ -246,7 +246,7 @@ class Line2D(LineGeometry2D):
 
         Returns
         -------
-        line : `astro_lfd.geom.line.Line2D`
+        line : `astro_lfd.geom.Line2D`
             An instance of `Line2D` defined by the two points.
         """
         return cls.from_point_and_direction(p0, p1 - p0)
@@ -264,7 +264,7 @@ class Line2D(LineGeometry2D):
 
         Returns
         -------
-        line : `astro_lfd.geom.line.Line2D`
+        line : `astro_lfd.geom.Line2D`
             An instance of `Line2D` defined by the point and direction.
 
         Raises
@@ -474,91 +474,181 @@ class LineSegment2D(LineGeometry2D):
         self._interval = interval
 
     @classmethod
-    def from_center_length(cls, line: Line2D, u_center: float, length: float) -> Self:
+    def from_center_length(cls, line: Line2D, s_center: float, length: float) -> Self:
         h = 0.5 * length
-        interval = geom.IntervalD.fromSpannedPoints((u_center - h, u_center + h))
+        interval = geom.IntervalD.fromSpannedPoints((s_center - h, s_center + h))
         return cls(line, interval)
 
     @classmethod
     def from_points(cls, p0: geom.Point2D, p1: geom.Point2D) -> Self:
+        """Create a `LineSegment2D` instance from two defining points.
+
+        Parameters
+        ----------
+        p0, p1 : `lsst.geom.Point2D`
+            The two defining points.
+
+        Returns
+        -------
+        line : `astro_lfd.geom.LineSegment2D`
+            An instance of `LineSegment2D` defined by the two points.
+        """
         line = Line2D.from_points(p0, p1)
         interval = geom.IntervalD.fromSpannedPoints([line.project(p0), line.project(p1)])
 
         return cls(line, interval)
 
     @property
+    def interval(self) -> geom.IntervalD:
+        """The parameter interval of the line segment (`geom.IntervalD`)."""
+        return self._interval
+
+    @property
     def line(self) -> Line2D:
+        """The infinite line representation (`Line2D`)."""
         return self._line
 
     @property
     def rho(self) -> float:
+        """The signed perpendicular distance from the origin to the line
+        (`float`).
+        """
         return self._line.rho
 
     @property
     def theta(self) -> geom.Angle:
+        """The angle of the line normal vector (`lsst.geom.Angle`)."""
         return self._line.theta
 
     @property
-    def interval(self) -> geom.IntervalD:
-        return self._interval
-
-    @property
     def length(self) -> float:
+        """The length of the line (`float`)."""
         return self.interval.size
 
     @property
-    def u_center(self) -> float:
+    def s_center(self) -> float:
+        """The center along-line coordinate of the line segment (`float`)."""
         return self.interval.center
 
     @property
-    def u_max(self) -> float:
+    def s_max(self) -> float:
+        """The maximum along-line coordinate of the line segment (`float`)."""
         return self.interval.max
 
     @property
-    def u_min(self) -> float:
+    def s_min(self) -> float:
+        """The minimum along-line coordinate of the line segment (`float`)."""
         return self.interval.min
 
     @property
     def center(self) -> geom.Point2D:
-        return self.at(self.u_center)
+        """The center point of the line segment (`geom.Point2D`)."""
+        return self.at(self.s_center)
 
     @property
     def p0(self) -> geom.Point2D:
-        return self.at(self.u_min)
+        """The start point of the line segment (`geom.Point2D`)."""
+        return self.at(self.s_min)
 
     @property
     def p1(self) -> geom.Point2D:
-        return self.at(self.u_max)
+        """The end point of the line segment (`geom.Point2D`)."""
+        return self.at(self.s_max)
 
     def as_line(self) -> Line2D:
+        """Get the line representation of the line geometry.
+
+        Returns
+        -------
+        line : `astro_lfd.geom.Line2D`
+            The line representation.
+        """
         return self.line
 
     def at(self, s: float) -> geom.Point2D:
+        """Evaluate the line geometry at the along-line coordinate.
+
+        Parameters
+        ----------
+        s : `float`
+            The signed coordinate along the line direction.
+
+        Returns
+        -------
+        point : `lsst.geom.Point2D`
+            The point on the line at the along-line coordinate.
+        """
         return self.line.at(s)
 
     def contains(self, point: geom.Point2D, atol: float = 1e-12) -> bool:
-        """Return ``True`` if point lies on segment."""
+        """Return `True` if point lies on the line geometry.
+
+        Parameters
+        ----------
+        point : `lsst.geom.Point2D`
+            The point to test.
+        atol : `float`, optional
+            The maximum allowable distance, in pixels, between the point and
+            the line geometry (1e-12, by default).
+
+        Returns
+        -------
+        does_contain : `bool`
+            `True` if the point lies on the line geometry, `False` if not.
+        """
         if not self.line.contains(point, atol=atol):
             return False
 
         s = self.line.project(point)
         return (self.interval.min - atol) <= s <= (self.interval.max + atol)
 
-    def intersections_with_box_edges(
+    def boundary_intersections(
         self,
         box: geom.Box2I | geom.Box2D,
         atol: float = 1e-12,
     ) -> list[geom.Point2D]:
+        """Return the line geometry intersection points with a box boundary.
 
+        Parameters
+        ----------
+        box : `lsst.geom.Box2I` or `lsst.geom.Box2D`
+            The box boundary to intersect the line geometry with.
+        atol : `float`, optional
+            The minimum allowable difference, in pixels, of the direction
+            vector components from zero (1e-12, by default).
+
+        Returns
+        -------
+        points : `list` [`lsst.geom.Point2D`]
+            The list of boundary intersection points (empty, if none exist).
+        """
         return [
-            p for p in self.line.intersections_with_box_edges(box, atol=atol) if self.contains(p, atol=atol)
+            p for p in self.line.boundary_intersections(box, atol=atol) if self.contains(p, atol=atol)
         ]
 
     def _defining_points(self) -> tuple[geom.Point2D, geom.Point2D]:
-        """Return segment endpoints."""
+       """Return two points defining the line.
+
+        Returns
+        -------
+        p0, p1 : `lsst.geom.Point2D`
+            The two defining points.
+        """
         return self.p0, self.p1
 
     def _interval_in_box(self, box: geom.Box2I | geom.Box2D) -> geom.IntervalD | None:
+        """Return the valid parameter interval in a box boundary.
+
+        Parameters
+        ----------
+        box : `lsst.geom.Box2I` or `lsst.geom.Box2D`
+            The box boundary to constrain the line geometry interval within.
+
+        Returns
+        -------
+        interval : `lsst.geom.IntervalD`
+            The parameter interval in the box.
+        """
         box_interval = _line_box_interval(self.line, box)
 
         if box_interval is None:
@@ -573,7 +663,7 @@ class LineSegment2D(LineGeometry2D):
         return geom.IntervalD.fromSpannedPoints([smin, smax])
 
 
-def embed_rho_theta(
+def _embed_rho_theta(
     rho: ArrayLike,
     theta: ArrayLike,
     rho_tol: float,
