@@ -1,19 +1,11 @@
-"""Adapter exposing streak line geometry on an afw `SourceRecord`.
-
-`StreakAdapter` wraps a single `lsst.afw.table.SourceRecord` and presents its
-``line_*`` fields as `~astro_lfd.geom.line.Line2D` / `LineSegment2D` geometry,
-bridging the LSST measurement catalog to the LFD line primitives.
-"""
-
 from __future__ import annotations
 
 from typing import Any
 
-import numpy as np
-
 import lsst.afw.detection as afwDetect
 import lsst.afw.table as afwTable
 import lsst.geom as geom
+import numpy as np
 
 from ..geom.line import Line2D, LineSegment2D
 
@@ -58,18 +50,18 @@ class StreakAdapter:
 
         Returns
         -------
-        line : `astro_lfd.geom.line.Line2D`
+        line : `astro_lfd.geom.Line2D`
             The line defined by the ``line_rho`` and ``line_theta`` fields.
         """
         return Line2D(rho=self["line_rho"], theta=self["line_theta"])
 
     def getLineSegment(self) -> LineSegment2D:
-        """Return the finite streak segment.
+        """Return the finite line segment for this streak.
 
         Returns
         -------
-        segment : `astro_lfd.geom.line.LineSegment2D`
-            The segment defined by the line plus ``line_u_center`` and
+        line_segment : `astro_lfd.geom.LineSegment2D`
+            The line segment defined by the line plus ``line_u_center`` and
             ``line_length``.
         """
         return LineSegment2D.from_center_length(
@@ -78,18 +70,18 @@ class StreakAdapter:
             length=self["line_length"],
         )
 
-    def setLineSegment(self, segment: LineSegment2D) -> None:
+    def setLineSegment(self, line_segment: LineSegment2D) -> None:
         """Store a line segment into the record's ``line_*`` fields.
 
         Parameters
         ----------
-        segment : `astro_lfd.geom.line.LineSegment2D`
-            The segment to persist.
+        line_segment : `astro_lfd.geom.LineSegment2D`
+            The line segment to persist.
         """
-        self["line_rho"] = segment.rho
-        self["line_theta"] = segment.theta
-        self["line_u_center"] = segment.interval.center
-        self["line_length"] = segment.length
+        self["line_rho"] = line_segment.rho
+        self["line_theta"] = line_segment.theta
+        self["line_u_center"] = line_segment.interval.center
+        self["line_length"] = line_segment.length
 
     def getFootprint(self) -> afwDetect.Footprint:
         """Return the record's footprint (`lsst.afw.detection.Footprint`)."""
@@ -138,38 +130,42 @@ class StreakAdapter:
         schema = afwTable.SourceTable.makeMinimalSchema()
         schema.addField(
             "line_rho",
+            doc="Hesse normal form rho (distance) parameter of the line.",
             type=np.float64,
             units="pixel",
         )
         schema.addField(
             "line_theta",
+            doc="Hesse normal form theta (angle) parameter of the line.",
             type=geom.Angle,
         )
         schema.addField(
             "line_u_center",
+            doc="Center point of the line segment.",
             type=np.float64,
             units="pixel",
         )
         schema.addField(
             "line_length",
+            doc="Length of the line segment.",
             type=np.float64,
             units="pixel",
         )
         schema.addField(
             "line_sigma",
-            type=np.float64,
             doc="Moffat sigma (width) parameter of the fit line profile.",
+            type=np.float64,
             units="pixel",
         )
         schema.addField(
             "line_reduced_chi2",
-            type=np.float64,
             doc="Reduced chi-squared of the line profile fit.",
+            type=np.float64,
         )
         schema.addField(
             "line_model_maximum",
-            type=np.float64,
             doc="Peak absolute value of the fit line profile model.",
+            type=np.float64,
             units="nJy",
         )
         afwTable.Point2DKey.addFields(

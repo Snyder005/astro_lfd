@@ -70,24 +70,24 @@ class LineGeometry2D(ABC):
 
         Returns
         -------
-        line : `astro_lfd.geom.line.Line2D`
+        line : `astro_lfd.geom.Line2D`
             The line representation.
         """
         ...
 
     @abstractmethod
     def at(self, s: float) -> geom.Point2D:
-        """Evaluate the line geometry at the line direction coordinate.
+        """Evaluate the line geometry at the along-line coordinate.
 
         Parameters
         ----------
         s : `float`
-            The signed coordinate along the line direction.
+            The (signed) coordinate along the line direction.
 
         Returns
         -------
         point : `lsst.geom.Point2D`
-            The point on the line.
+            The point on the line at the along-line coordinate.
         """
         ...
 
@@ -110,55 +110,6 @@ class LineGeometry2D(ABC):
         """
         ...
 
-    @abstractmethod
-    def intersections_with_box_edges(
-        self,
-        box: geom.Box2I | geom.Box2D,
-        atol: float = 1e-12,
-    ) -> list[geom.Point2D]:
-        """Return the  intersection points with a box boundary.
-
-        Parameters
-        ----------
-        box : `lsst.geom.Box2I` or `lsst.geom.Box2D`
-            The box boundary to intersect the line geometry with.
-        atol : `float`, optional
-            The minimum allowable difference, in pixels, of the direction
-            vector components from zero (1e-12, by default).
-        Returns
-        -------
-        points : `list` [`lsst.geom.Point2D`]
-            The list of intersection points (empty, if none exist).
-        """
-        ...
-
-    @abstractmethod
-    def _defining_points(self) -> tuple[geom.Point2D, geom.Point2D]:
-        """Return the two points defining the line geometry.
-
-        Returns
-        -------
-        p0, p1 : `lsst.geom.Point2D`
-            The two defining points.
-        """
-        ...
-
-    @abstractmethod
-    def _interval_in_box(self, box: geom.Box2I | geom.Box2D) -> geom.IntervalD | None:
-        """Return the valid parameter interval in a box boundary.
-
-        Parameters
-        ----------
-        box : `lsst.geom.Box2I` or `lsst.geom.Box2D`
-            The box boundary to constrain the line geometry interval within.
-
-        Returns
-        -------
-        interval : `lsst.geom.IntervalD`
-            The parameter interval in the box.
-        """
-        ...
-
     def clipped_to(self, box: geom.Box2D | geom.Box2I) -> LineSegment2D | None:
         """Clip line geometry to a box.
 
@@ -169,7 +120,7 @@ class LineGeometry2D(ABC):
 
         Returns
         -------
-        line_segment : `astro_lfd.geom.line.LineSegment2D`
+        line_segment : `astro_lfd.geom.LineSegment2D`
             The segment of the line geometry clipped to the box.
         """
         interval = self._interval_in_box(box)
@@ -179,7 +130,7 @@ class LineGeometry2D(ABC):
         return LineSegment2D(self.as_line(), interval=interval)
 
     def intersection(self, box: geom.Box2D | geom.Box2I) -> LineSegment2D | None:
-        """Return intersection with a box.
+        """Return the intersection with a box.
 
         Parameters
         ----------
@@ -188,35 +139,33 @@ class LineGeometry2D(ABC):
 
         Returns
         -------
-        line_segment : `astro_lfd.geom.line.LineSegment2D`
+        line_segment : `astro_lfd.geom.LineSegment2D`
             The segment of the line geometry that intersects the box.
         """
         return self.clipped_to(box)
 
-    def transformed(self, transform: Any) -> Self:
-        """Apply a geometric transformation.
-
-        The supplied transform maps points expressed in the current coordinate
-        system into points in the target coordinate system.
+    @abstractmethod
+    def intersections_with_box_edges(
+        self,
+        box: geom.Box2I | geom.Box2D,
+        atol: float = 1e-12,
+    ) -> list[geom.Point2D]:
+        """Return the line geometry intersection points with a box boundary.
 
         Parameters
         ----------
-        transform : `lsst.geom.AffineTransform` or \
-                    `lsst.afw.geom.TransformPoint2ToPoint2`
-            Transform that maps points from the current coordinate system into
-            the target coordinate system.
+        box : `lsst.geom.Box2I` or `lsst.geom.Box2D`
+            The box boundary to intersect the line geometry with.
+        atol : `float`, optional
+            The minimum allowable difference, in pixels, of the direction
+            vector components from zero (1e-12, by default).
 
         Returns
         -------
-        transformed : `astro_lfd.geom.line.LineGeometry2D`
-            A new line geometry in the target coordinate system.
+        points : `list` [`lsst.geom.Point2D`]
+            The list of intersection points (empty, if none exist).
         """
-        p0, p1 = self._defining_points()
-
-        p0_t = _apply_transform(transform, p0)
-        p1_t = _apply_transform(transform, p1)
-
-        return type(self).from_points(p0_t, p1_t)
+        ...
 
     def rotated(self, angle: geom.Angle) -> Self:
         """Apply a rotational transformation.
@@ -248,6 +197,31 @@ class LineGeometry2D(ABC):
         """
         return self.transformed(geom.AffineTransform.makeScaling(factor))
 
+    def transformed(self, transform: Any) -> Self:
+        """Apply a geometric transformation.
+
+        The supplied transform maps points expressed in the current coordinate
+        system into points in the target coordinate system.
+
+        Parameters
+        ----------
+        transform : `lsst.geom.AffineTransform` or \
+                    `lsst.afw.geom.TransformPoint2ToPoint2`
+            Transform that maps points from the current coordinate system into
+            the target coordinate system.
+
+        Returns
+        -------
+        transformed : `astro_lfd.geom.line.LineGeometry2D`
+            A new line geometry in the target coordinate system.
+        """
+        p0, p1 = self._defining_points()
+
+        p0_t = _apply_transform(transform, p0)
+        p1_t = _apply_transform(transform, p1)
+
+        return type(self).from_points(p0_t, p1_t)
+
     def translated(self, offset: geom.Extent2D) -> Self:
         """Apply a translation transformation.
 
@@ -262,6 +236,33 @@ class LineGeometry2D(ABC):
             The transformed line geometry.
         """
         return self.transformed(geom.AffineTransform.makeTranslation(offset))
+
+    @abstractmethod
+    def _defining_points(self) -> tuple[geom.Point2D, geom.Point2D]:
+        """Return the two points defining the line geometry.
+
+        Returns
+        -------
+        p0, p1 : `lsst.geom.Point2D`
+            The two defining points.
+        """
+        ...
+
+    @abstractmethod
+    def _interval_in_box(self, box: geom.Box2I | geom.Box2D) -> geom.IntervalD | None:
+        """Return the valid parameter interval in a box boundary.
+
+        Parameters
+        ----------
+        box : `lsst.geom.Box2I` or `lsst.geom.Box2D`
+            The box boundary to constrain the line geometry interval within.
+
+        Returns
+        -------
+        interval : `lsst.geom.IntervalD`
+            The parameter interval in the box.
+        """
+        ...
 
 
 class Line2D(LineGeometry2D):
@@ -290,14 +291,14 @@ class Line2D(LineGeometry2D):
 
     @classmethod
     def from_point_and_direction(cls, point: geom.Point2D, direction: geom.Extent2D) -> Self:
-        """Create a `Line2D` instance from a point and a direction.
+        """Create a `Line2D` instance from a point and a direction vector.
 
         Parameters
         ----------
         point : `lsst.geom.Point2D`
             A point on the line.
         direction : `lsst.geom.Extent2D`
-            The direction of the line.
+            The direction vector of the line.
 
         Returns
         -------
@@ -321,6 +322,23 @@ class Line2D(LineGeometry2D):
         return cls(rho, theta)
 
     @property
+    def direction(self) -> geom.Extent2D:
+        """The line direction vector (`lsst.geom.Extent2D`)."""
+        t = self.theta.asRadians()
+        return geom.Extent2D(-math.sin(t), math.cos(t))
+
+    @property
+    def normal(self) -> geom.Extent2D:
+        """The line normal vector (`lsst.geom.Extent2D`)."""
+        t = self.theta.asRadians()
+        return geom.Extent2D(math.cos(t), math.sin(t))
+
+    @property
+    def origin(self) -> geom.Point2D:
+        """The point on the line closest to the origin (`lsst.geom.Point2D`)."""
+        return geom.Point2D(self.normal * self.rho)
+
+    @property
     def rho(self) -> float:
         """The signed perpendicular distance from the origin to the line
         (`float`).
@@ -332,38 +350,47 @@ class Line2D(LineGeometry2D):
         """The angle of the line normal vector (`lsst.geom.Angle`)."""
         return self._theta
 
-    @property
-    def normal(self) -> geom.Extent2D:
-        """The line normal vector (`lsst.geom.Extent2D`)."""
-        t = self.theta.asRadians()
-        return geom.Extent2D(math.cos(t), math.sin(t))
-
-    @property
-    def direction(self) -> geom.Extent2D:
-        """The line direction vector (`lsst.geom.Extent2D`)."""
-        t = self.theta.asRadians()
-        return geom.Extent2D(-math.sin(t), math.cos(t))
-
-    @property
-    def origin(self) -> geom.Point2D:
-        """The point on the line closest to the origin (`lsst.geom.Point2D`)."""
-        return geom.Point2D(self.normal * self.rho)
-
     def as_line(self) -> Line2D:
-        """Return the line representation.
+        """Get the line representation of the line geometry.
 
         Returns
         -------
-        line : `astro_lfd.geom.line.Line2D`
+        line : `astro_lfd.geom.Line2D`
             The line representation.
         """
         return self
 
     def at(self, s: float) -> geom.Point2D:
+        """Evaluate the line geometry at the along-line coordinate.
+
+        Parameters
+        ----------
+        s : `float`
+            The (signed) coordinate along the line direction.
+
+        Returns
+        -------
+        point : `lsst.geom.Point2D`
+            The point on the line at the along-line coordinate.
+        """
         return self.origin + self.direction * s
 
     def contains(self, point: geom.Point2D, atol: float = 1e-12) -> bool:
-        """Return `True` if the point lies on the line."""
+        """Return `True` if point lies on the line geometry.
+
+        Parameters
+        ----------
+        point : `lsst.geom.Point2D`
+            The point to test.
+        atol : `float`, optional
+            The maximum allowable distance, in pixels, between the point and
+            the line geometry (1e-12, by default).
+
+        Returns
+        -------
+        does_contain : `bool`
+            `True` if the point lies on the line geometry, `False` if not.
+        """
         return abs(self.signed_distance(point)) <= atol
 
     def intersections_with_box_edges(
@@ -414,8 +441,8 @@ class Line2D(LineGeometry2D):
         Returns
         -------
         s : `float`
-            Signed longitudinal coordinate along the line direction relative
-            to the point closest to the origin.
+            The (signed) coordinate along the line direction relative to the
+            point closest to the origin.
         """
         delta = point - self.origin
         return _dot(delta, self.direction)
