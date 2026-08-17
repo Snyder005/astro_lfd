@@ -1,34 +1,11 @@
-"""Kernel Hough Transform (KHT) streak detection as an LSST task.
-
-`KHTDetectTask` finds straight linear features (satellite streaks, and similar
-signals) in an `lsst.afw.image.Exposure`.  It reproduces the detection stages of
-`lsst.meas.algorithms.maskStreaks.MaskStreaksTask` -- Canny edge extraction,
-`lsst.kht` line finding, recursive k-means clustering, and a Moffat line-profile
-fit -- but emits its results as a `~lsst.afw.table.SourceCatalog` of canonical
-line segments (via `~astro_lfd.table.streakAdapter.StreakAdapter`) instead of a
-mask plane.
-
-The profile fitter (`Line`, `LineProfile`) is imported from ``maskStreaks``
-rather than reimplemented, so any difference in the fit itself is shared between
-the two tasks.  This module is intended as the template for future
-``astro_lfd`` detector tasks, including the ADRT-based detector.
-"""
-
-# mypy: disable-error-code="var-annotated, attr-defined"
-# `lsst.pex.config.Field` descriptors are declared in the `Config` class body
-# without a type annotation and read back as instance attributes; mypy cannot
-# model this dynamic descriptor protocol, so the resulting false positives are
-# silenced for this module.
-
 from __future__ import annotations
 
+import math
+import numpy as np
 from numpy.typing import NDArray
 from skimage.feature import canny
 from sklearn.cluster import KMeans
-import math
-import numpy as np
 
-from lsst.meas.algorithms.maskStreaks import Line, LineCollection, LineProfile
 import lsst.afw.detection as afwDetect
 import lsst.afw.geom as afwGeom
 import lsst.afw.image as afwImage
@@ -38,8 +15,9 @@ import lsst.geom as geom
 import lsst.kht
 import lsst.pex.config as pexConfig
 import lsst.pipe.base as pipeBase
+from lsst.meas.algorithms.maskStreaks import Line, LineCollection, LineProfile
 
-from .utils import binary_dilation, get_pixel_mask, timed
+from .base import binary_dilation, get_pixel_mask, timed
 from ..geom.line import Line2D
 from ..table.streakAdapter import StreakAdapter
 
@@ -149,14 +127,7 @@ class KHTDetectConfig(pexConfig.Config):
 
 
 class KHTDetectTask(pipeBase.Task):
-    """Detect straight linear features with the Kernel Hough Transform.
-
-    The task runs the same detection stages as
-    `lsst.meas.algorithms.maskStreaks.MaskStreaksTask` (Canny edges, `lsst.kht`
-    line finding, recursive k-means clustering, and a Moffat profile fit) but
-    records each accepted line as a `~astro_lfd.table.streakAdapter.StreakAdapter`
-    row in a `~lsst.afw.table.SourceCatalog`.
-    """
+    """Detect straight linear features with the Kernel Hough Transform."""
 
     ConfigClass = KHTDetectConfig
     _DefaultName = "khtDetect"
@@ -169,22 +140,22 @@ class KHTDetectTask(pipeBase.Task):
         Parameters
         ----------
         table : `lsst.afw.table.SourceTable`
-            Source table used to construct the output catalog.  Its schema must
-            provide the streak ``line_*`` fields (see
+            The source table used to construct the output catalog. Its schema
+            must provide the streak ``line_*`` fields (see
             `~astro_lfd.table.streakAdapter.StreakAdapter.makeMinimalSchema`).
         exposure : `lsst.afw.image.ExposureF`
-            Exposure to search.  The mask plane named by
+            The exposure to search. The mask plane named by
             ``config.detected_mask_plane`` must flag the detected pixels.
 
         Returns
         -------
         result : `lsst.pipe.base.Struct`
-            Result as a struct with attributes:
+            The task result as a struct with attributes:
 
             ``streaks``
                 Catalog of detected streaks (`lsst.afw.table.SourceCatalog`).
             ``edges``
-                Binary Canny edge image with invalid regions masked
+                Canny binary edge map with invalid regions masked
                 (`numpy.ndarray`).
             ``timings``
                 Computing times for each processing step (`dict`)
@@ -207,14 +178,13 @@ class KHTDetectTask(pipeBase.Task):
         Parameters
         ----------
         exposure: `lsst.afw.image.ExposureF`
-            Exposure to search. The mask plane named by
+            The exposure to search. The mask plane named by
             ``config.detected_mask_plane`` must flag the detected pixels.
 
         Returns
         -------
-        edges : `numpy.ndarray`
-            Binary Canny edge image with invalid regions masked
-            (`numpy.ndarray`).
+        edges : `numpy.ndarray`, (Ny, Nx)
+            The Canny binary edge map with invalid regions masked.
         """
         mi = afwMath.binImage(exposure.maskedImage, self.config.bin_size)
         detected_mask = get_pixel_mask(mi.mask, self.config.detected_mask_plane)
@@ -237,7 +207,19 @@ class KHTDetectTask(pipeBase.Task):
 
     @timed("detect")
     def detect(self, edges: NDArray[np.bool_]) -> tuple(NDArray[np.float64], NDArray[np.float64]):
-        """Perform linear feature detection."""
+        """Perform linear feature detection on Canny binary edge map.
+
+        Parameters
+        ----------
+        edges : `numpy.ndarray`, (Ny, Nx)
+            The Canny binary edge map.
+
+        Returns
+        -------
+        rhos, thetas : `numpy.ndarray`
+            The Hesse normal form rho and theta parameters of the detected
+            lines.
+        """
         lines = lsst.kht.find_lines(
             edges,
             math.floor(self.config.cluster_minimum_size / self.config.bin_size),
@@ -259,29 +241,29 @@ class KHTDetectTask(pipeBase.Task):
         *,
         rhos: NDArray[np.float64],
         thetas: NDArray[np.float64],
-    ):
-        """Perform postprocessing of detected linear features."""
+    ) -> None:
+        """Perform postprocessing of detected linear features.
+
+        Parameters
+        ----------
+        streaks : `lsst.afw.table.SourceTable`
+            The output streak catalog.
+        exposure : `lsst.afw.image.ExposureF`
+            The exposure that was searched.
+        rhos, thetas : `numpy.ndarray`
+            The Hesse normal form rho and theta parameters of the detected
+            lines after cluster consolidation.
+        """
         if rhos.size == 0:
-            return pipeBase.Struct(streaks=streaks)
+            return
 
         rhos, thetas = self._cluster_lines(rhos, thetas)
-
         bad_mask = get_pixel_mask(exposure.mask, self.config.bad_mask_planes)
         detected_mask = get_pixel_mask(exposure.mask, self.config.detected_mask_plane)
-
-        # Build fit weights: inverse variance, with invalid pixels zeroed.
-        # Zero on the undilated bad planes (not the one-pixel-dilated edge
-        # mask) so the pixels driving the profile fit match those used by
-        # `MaskStreaksTask._fitProfile`.
         weights = exposure.variance.array**-1
         weights[~np.isfinite(weights) | ~np.isfinite(exposure.image.array)] = 0
         weights[bad_mask] = 0
 
-        # The profile fit works in image-array coordinates centered on the
-        # image, so map the fit line into absolute pixel coordinates by
-        # translating from the image center. Using the exposure bounding box
-        # keeps the frame consistent with the fitted image array and avoids a
-        # hard dependence on the detector being attached.
         box = exposure.getBBox()
         wcs = exposure.getWcs()
         shift = geom.Extent2D(box.getCenter())
@@ -313,6 +295,7 @@ class KHTDetectTask(pipeBase.Task):
             line_segment = det_line.intersection(box)
             if line_segment is None:
                 continue
+
             center = line_segment.center
 
             footprint_mask = afwImage.Mask(final_line_mask.astype(np.int32))
@@ -326,8 +309,6 @@ class KHTDetectTask(pipeBase.Task):
                 streak.setCoord(wcs.pixelToSky(center))
             streak["line_center_x"] = center.getX()
             streak["line_center_y"] = center.getY()
-            # Carry the profile-fit quality metrics.  `fit` is a maskStreaks
-            # `Line` whose `reducedChi2` field holds the reduced chi-squared.
             streak["line_sigma"] = fit.sigma
             streak["line_reduced_chi2"] = fit.reducedChi2
             streak["line_model_maximum"] = float(model_maximum)
@@ -341,21 +322,17 @@ class KHTDetectTask(pipeBase.Task):
     ) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
         """Cluster nearby lines by recursive k-means clustering.
 
-        The rho/theta parameters are rescaled by their configured bin sizes so
-        that both axes are comparable, then k-means is run with an increasing
-        number of clusters until every cluster has a per-axis standard deviation
-        at or below one bin.  The cluster centers are the consolidated lines.
-
         Parameters
         ----------
         rhos, thetas : `numpy.ndarray`
-            The rho (pixels) and theta (degrees) parameters of the detected
+            The Hesse normal form rho and theta parameters of the detected
             lines.
 
         Returns
         -------
         rhos, thetas : `numpy.ndarray`
-            The rho and theta parameters of the consolidated cluster centers.
+            The Hesse normal form rho and theta parameters of the consolidated
+            cluster centers.
         """
         x = rhos / self.config.rho_bin_size
         y = thetas / self.config.theta_bin_size
