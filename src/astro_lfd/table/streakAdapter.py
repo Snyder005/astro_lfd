@@ -1,4 +1,4 @@
-from __future__ import annotations
+__all__ = ["StreakAdapter"]
 
 from typing import Any
 
@@ -8,8 +8,6 @@ import lsst.geom as geom
 import numpy as np
 
 from ..geom.line import Line2D, LineSegment2D
-
-__all__ = ["StreakAdapter"]
 
 
 class StreakAdapter:

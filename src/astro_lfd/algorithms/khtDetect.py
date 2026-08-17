@@ -1,4 +1,4 @@
-from __future__ import annotations
+__all__ = ["KHTDetectConfig", "KHTDetectTask"]
 
 import math
 import numpy as np
@@ -20,8 +20,6 @@ from lsst.meas.algorithms.maskStreaks import Line, LineCollection, LineProfile
 from .base import binary_dilation, get_pixel_mask, timed
 from ..geom.line import Line2D
 from ..table.streakAdapter import StreakAdapter
-
-__all__ = ["KHTDetectConfig", "KHTDetectTask"]
 
 
 class KHTDetectConfig(pexConfig.Config):

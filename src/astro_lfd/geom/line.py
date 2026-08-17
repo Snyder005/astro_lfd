@@ -1,20 +1,15 @@
 from __future__ import annotations
 
+__all__ = ["Line2D", "LineGeometry2D", "LineSegment2D"]
+
 import math
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Any, Self
 
+import lsst.geom as geom
 import numpy as np
 from numpy.typing import ArrayLike, NDArray
-
-import lsst.geom as geom
-
-__all__ = [
-    "Line2D",
-    "LineGeometry2D",
-    "LineSegment2D",
-]
 
 
 class LineGeometry2D(ABC):
