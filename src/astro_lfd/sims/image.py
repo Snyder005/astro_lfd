@@ -45,7 +45,41 @@ class SimulatedImage:
     meta: dict = field(default_factory=dict)
 
     @classmethod
+    def from_exposure(cls, exposure: afwImage.ExposureF) -> Self:
+        """Create a `SimulatedImage` instance from an exposure.
+
+        Parameters
+        ----------
+        exposure : `lsst.afw.image.ExposureF`
+            The streak exposure.
+
+        Returns
+        -------
+        simulated_image : `astro_lfd.sims.SimulatedImage`
+            The simulated image with its variance and mask planes.
+        """
+        md = exposure.getMetadata()
+        return cls(
+            exposure.image.array.copy(),
+            exposure.variance.array.copy(),
+            exposure.mask.array.copy(),
+            {key: md.get(key) for key in md.names()},
+        )
+
+    @classmethod
     def load_npz(cls, infile: str) -> Self:
+        """Create a `SimulatedImage` instance by loading an NPZ file.
+
+        Parameters
+        ----------
+        infile : `str`
+            The input file name.
+
+        Returns
+        -------
+        simulated_image : `astro_lfd.sims.SimulatedImage`
+            The simulated image with its variance and mask planes.
+        """
         d = np.load(infile, allow_pickle=False)
         return cls(d["image"], d["variance"], d["mask"], ast.literal_eval(str(d["meta"])))
 
@@ -62,7 +96,8 @@ class SimulatedImage:
         unit: str = "nJy",
         seed: int | None = None,
     ) -> Self:
-        """Simulate a background-subtracted difference image with one streak.
+        """Create a `SimulatedImage` instance by simulating an image with a
+        single streak.
 
         Parameters
         ----------
@@ -87,7 +122,7 @@ class SimulatedImage:
         unit : `str`, optional
             The output brightness unit label (nJy, by default).
         seed : `int`
-            Seed for the random generator (None, by default).
+            The seed for the random generator (None, by default).
 
         Returns
         -------
@@ -95,18 +130,14 @@ class SimulatedImage:
             The simulated image with its variance and mask planes.
         """
         sky = SKY_COUNTS[band]
-        signal = streak.get_signal(shape, fwhm / pixel_scale)  # electrons, noise-free
+        signal = streak.get_signal(shape, fwhm / pixel_scale)
         rng = np.random.default_rng(seed)
 
-        # Image plane (electrons): read noise + sky (mean-subtracted) + streak.
         image = rng.normal(0.0, read_noise, size=shape)
         image += rng.poisson(sky, size=shape) - sky
         image += rng.poisson(signal)
-
-        # Variance plane (electrons^2): read noise + sky + streak (Poisson terms).
         variance = np.full(shape, read_noise**2) + sky + signal
 
-        # Convert electrons -> output unit (variance scales as the square).
         image = (image / calib).astype(np.float32)
         variance = (variance / calib**2).astype(np.float32)
         mask = np.zeros(shape, dtype=np.int32)
@@ -124,13 +155,44 @@ class SimulatedImage:
 
         return cls(image, variance, mask, meta)
 
-    def save_npz(self, outfile: str) -> None:
-        """Save as an NPZ file.
+    def to_exposure(self) -> afwImage.ExposureF:
+        """Convert to an exposure.
+
+        Returns
+        -------
+        exposure : `lsst.afw.image.ExposureF`
+            An exposure with image, variance, and mask planes plus a header.
+        """
+        ny, nx = self.image.shape
+        exposure = afwImage.ExposureF(nx, ny)
+        exposure.image.array[:] = self.image
+        exposure.variance.array[:] = self.variance
+        exposure.mask.array[:] = self.mask
+
+        md = exposure.getMetadata()
+        for key, value in self.meta.items():
+            if value is not None:
+                md.set(key, value)
+
+        return exposure
+
+    def write_fits(self, outfile: str) -> None:
+        """Write as an LSST-compatible multi-plane FITS file.
+
+        Parameters
+        ----------
+        outfile : `str`
+            The output file name.
+        """
+        self.to_exposure().writeFits(outfile)
+
+    def write_npz(self, outfile: str) -> None:
+        """Write as an NPZ file.
 
         Parmaters
         ---------
         outfile : `str`
-            Output file name (``.npz`` appended if absent).
+            The output file name (``.npz`` appended if absent).
         """
         np.savez_compressed(
             path,
@@ -139,23 +201,3 @@ class SimulatedImage:
             mask=self.mask,
             meta=np.array(repr(self.meta)),
         )
-
-    def to_exposure(self) -> afwImage.ExposureF:
-        """Convert to an exposure.
-
-        Returns
-        -------
-        exposure : `lsst.afw.image.ExposureF`
-            Exposure with image, variance, and mask planes plus a header.
-        """
-        ny, nx = self.image.shape
-        exp = afwImage.ExposureF(nx, ny)  # (width, height)
-        exp.image.array[:] = self.image
-        exp.variance.array[:] = self.variance
-        exp.mask.array[:] = self.mask
-        md = exp.getMetadata()
-        for key, value in self.meta.items():
-            if value is not None:
-                md.set(key, value)
-
-        return exp
