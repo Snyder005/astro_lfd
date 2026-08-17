@@ -1,12 +1,12 @@
+__all__ = ["WriteStreakCatalogConfig", "WriteStreakCatalogTask"]
+
 import lsst.afw.image as afwImage
 import lsst.afw.table as afwTable
 import lsst.geom as geom
 import lsst.pipe.base as pipeBase
 
-from astro_lfd.geom import Line2D
-from astro_lfd.table import StreakAdapter
-
-__all__ = ["WriteStreakCatalogConfig", "WriteStreakCatalogTask"]
+from ..geom.line import Line2D
+from ..table.streakAdapter import StreakAdapter
 
 
 class WriteStreakCatalogConnections(
@@ -52,19 +52,20 @@ class WriteStreakCatalogTask(pipeBase.PipelineTask):
     ConfigClass = WriteStreakCatalogConfig
 
     def run(self, streaks: dict, difference: afwImage.ExposureF) -> pipeBase.Struct:
-        """Convert `streaks` structured dictionary to a catalog.
+        """Convert a `streaks` structured dictionary to a catalog.
 
         Parameters
         ----------
         streaks: `dict`
-            Structured dictionary of detected streaks to be converted.
+            The structured dictionary of detected streaks to be converted.
         difference: `lsst.afw.image.ExposureF`
-            Difference image with detection mask plane filled in.
+            The difference image exposure with a detected pixel mask plane
+            filled in.
 
         Returns
         -------
         result : `lsst.pipe.base.Struct`
-            Result as a struct with attributes:
+            The result as a struct with attributes:
 
             ``output_catalog``
                 Catalog of detected streaks (`lsst.afw.table.SourceCatalog`).

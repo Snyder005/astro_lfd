@@ -1,20 +1,12 @@
-# To Do: Add runQuantum function to incorporate partial failures and id generator
-
-# mypy: disable-error-code="var-annotated, attr-defined"
-# `lsst.pex.config.Field` descriptors are declared in the `Config` class body
-# without a type annotation and read back as instance attributes; mypy cannot
-# model this dynamic descriptor protocol, so the resulting false positives are
-# silenced for this module (as in `astro_lfd.meas.detectStreaks`).
+__all__ = ["StreakAnalysisConfig", "StreakAnalysisTask"]
 
 import lsst.afw.image as afwImage
 import lsst.afw.table as afwTable
 import lsst.pex.config as pexConfig
 import lsst.pipe.base as pipeBase
 
-from astro_lfd.meas import KHTDetectTask
-from astro_lfd.table import StreakAdapter
-
-__all__ = ["StreakAnalysisConfig", "StreakAnalysisTask"]
+from ..algorithms.khtDetect import KHTDetectTask
+from ..table.streakAdapter import StreakAdapter
 
 
 class StreakAnalysisConnections(
@@ -22,6 +14,8 @@ class StreakAnalysisConnections(
     dimensions=("instrument", "visit", "detector"),
     defaultTemplates={"coaddName": "deep", "fakesType": ""},
 ):
+    """Connections for `WriteStreakCatalogTask`."""
+
     difference = pipeBase.connectionTypes.Input(
         doc="Input difference image with detection mask plane filled in.",
         name="{fakesType}{coaddName}Diff_differenceExp",
@@ -37,6 +31,8 @@ class StreakAnalysisConnections(
 
 
 class StreakAnalysisConfig(pipeBase.PipelineTaskConfig, pipelineConnections=StreakAnalysisConnections):
+    """Configurable parameters for `StreakAnalysisTask`."""
+
     detection_algorithm = pexConfig.ChoiceField(
         dtype=str,
         default="kht",

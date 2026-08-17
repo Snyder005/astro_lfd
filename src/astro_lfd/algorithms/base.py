@@ -1,24 +1,29 @@
 from collections.abc import Callable
 from functools import wraps
 from time import perf_counter
-from typing import Concatenate, ParamSpec, TypeVar
+from typing import Concatenate, ParamSpec, Protocol, TypeVar
 
+import numpy as np
 from numpy.typing import NDArray
 from scipy.ndimage import distance_transform_edt
-import numpy as np
 
 import lsst.afw.image as afwImage
 
-__all__ = ["get_pixel_mask", "binary_dilation", "timed"]
+__all__ = ["binary_dilation", "get_pixel_mask", "HasTimings", "timed"]
 
 
-P = ParamSpec("P")
-R = TypeVar("R")
-S = TypeVar("S")
+class HasTimings(Protocol):
+    """A protocol defining structural behavior for timings.
+
+    Any class implementing this protocol must have an appropriate
+    ``self.timings`` parameter.
+    """
+
+    timings: dict[str, float]
 
 
 def get_pixel_mask(mask: afwImage.Mask, mask_plane: str | list[str]) -> NDArray[np.bool_]:
-    """Get the pixel mask array corresponding to the named mask planes.
+    """Get the binary array corresponding to the named mask planes.
 
     Parameters
     ----------
@@ -53,15 +58,33 @@ def binary_dilation(binary_image: NDArray[np.bool_], npix_to_dilate: int) -> NDA
     return distance_transform_edt(~binary_image) <= npix_to_dilate
 
 
-def timed(step: str):
-    def decorator[**P, R](
-        func: Callable[Concatenate[S, P], R],
-    ) -> Callable[Concatenate[S, P], R]:
+def timed[**P, R, S: HasTimings](
+    step: str,
+) -> Callable[[Callable[Concatenate[S, P], R]], Callable[Concatenate[S, P], R]]:
+    """Decorate a method to record its execution time.
+
+    The elapsed time is stored in ``self.timings[step]``. The timing is
+    recorded even if the decorated method raises an exception.
+
+    Parameters
+    ----------
+    step: `str`
+        Key under which to store the elapsed time in ``self.timings``.
+
+    Returns
+    -------
+    decorator : callable
+        A decorator that wraps the method while preserving its parameters and
+        return type.
+    """
+
+    def decorator(func: Callable[Concatenate[S, P], R]) -> Callable[Concatenate[S, P], R]:
         @wraps(func)
         def wrapper(self: S, *args: P.args, **kwargs: P.kwargs) -> R:
             t0 = perf_counter()
             try:
                 return func(self, *args, **kwargs)
+
             finally:
                 dt = perf_counter() - t0
                 self.timings[step] = dt
