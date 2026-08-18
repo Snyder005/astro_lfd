@@ -1,5 +1,5 @@
 import ast
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from typing import Self
 
 import lsst.afw.image as afwImage
@@ -130,7 +130,7 @@ class SimulatedImage:
             The simulated image with its variance and mask planes.
         """
         sky = SKY_COUNTS[band]
-        signal = streak.get_signal(shape, fwhm / pixel_scale)
+        signal = streak.get_signal(fwhm / pixel_scale, shape)
         rng = np.random.default_rng(seed)
 
         image = rng.normal(0.0, read_noise, size=shape)
