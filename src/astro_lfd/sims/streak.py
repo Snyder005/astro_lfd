@@ -25,9 +25,9 @@ class Streak:
         Signal at the ridge center.
     """
 
-    peak_signal: float
-    theta: float
     rho: float
+    theta: float
+    peak_signal: float
     width: float
 
     def get_signal(
@@ -79,5 +79,5 @@ class Streak:
             line.
         """
         w = self.width
-        y = 0.5 * (erf((x + w / 2) / (np.sqrt(2) * sigma)) - erf((x - w / 2) / (np.sqrt(2) * sigma)))
-        return y / erf(width / (2 * np.sqrt(2) * sigma))
+        y = 0.5 * (erf((d + w / 2) / (np.sqrt(2) * sigma)) - erf((d - w / 2) / (np.sqrt(2) * sigma)))
+        return y / erf(w / (2 * np.sqrt(2) * sigma))
