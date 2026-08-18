@@ -36,11 +36,6 @@ class KHTDetectConfig(pexConfig.Config):
         dtype=str,
         default=["NO_DATA", "INTRP", "BAD", "SAT", "EDGE", "ITL_DIP", "SPIKE"],
     )
-    saturated_detections_dilation = pexConfig.Field(
-        doc="Number of pixels to dilate the saturated detections mask.",
-        dtype=int,
-        default=250,
-    )
     bin_size = pexConfig.Field(
         doc="Pixel bin size for input image.",
         dtype=int,
@@ -167,10 +162,7 @@ class KHTDetectTask(pipeBase.Task):
         return pipeBase.Struct(streaks=streaks, edges=edges, timings=self.timings)
 
     @timed("preprocess")
-    def preprocess(
-        self,
-        exposure: afwImage.ExposureF,
-    ) -> NDArray[np.bool_]:
+    def preprocess(self, exposure: afwImage.ExposureF) -> NDArray[np.bool_]:
         """Perform preprocessing on input exposure.
 
         Parameters
@@ -186,25 +178,17 @@ class KHTDetectTask(pipeBase.Task):
         """
         mi = afwMath.binImage(exposure.maskedImage, self.config.bin_size)
         detected_mask = get_pixel_mask(mi.mask, self.config.detected_mask_plane)
+        edges = canny(detected_mask.astype(np.float64), use_quantiles=True, sigma=0.1)
+
         bad_mask = get_pixel_mask(mi.mask, self.config.bad_mask_planes)
-        init_edges = canny(detected_mask.astype(np.float64), use_quantiles=True, sigma=0.1)
+        if self.config.bin_size == 1:
+            bad_mask = binary_dilation(bad_mask, 1)
+        edges[bad_mask] = False
 
-        dilated_bad_mask = binary_dilation(bad_mask, 1) if self.config.bin_size == 1 else bad_mask
-        if self.config.saturated_detections_dilation:
-            sat_mask = get_pixel_mask(mi.mask, "SAT")
-            sat_detected_mask = binary_dilation(
-                sat_mask & detected_mask,
-                math.floor(self.config.saturated_detections_dilation / self.config.bin_size),
-            )
-            invalid = sat_detected_mask | dilated_bad_mask
-        else:
-            invalid = dilated_bad_mask
-
-        edges = init_edges & ~invalid
         return edges
 
     @timed("detect")
-    def detect(self, edges: NDArray[np.bool_]) -> tuple(NDArray[np.float64], NDArray[np.float64]):
+    def detect(self, edges: NDArray[np.bool_]) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
         """Perform linear feature detection on Canny binary edge map.
 
         Parameters
@@ -254,62 +238,27 @@ class KHTDetectTask(pipeBase.Task):
         """
         if rhos.size == 0:
             return
-
-        rhos, thetas = self._cluster_lines(rhos, thetas)
-        bad_mask = get_pixel_mask(exposure.mask, self.config.bad_mask_planes)
-        detected_mask = get_pixel_mask(exposure.mask, self.config.detected_mask_plane)
-        weights = exposure.variance.array**-1
-        weights[~np.isfinite(weights) | ~np.isfinite(exposure.image.array)] = 0
-        weights[bad_mask] = 0
+        else:
+            rhos, thetas = self._cluster_lines(rhos, thetas)
 
         box = exposure.getBBox()
         wcs = exposure.getWcs()
         shift = geom.Extent2D(box.getCenter())
         for rho, theta in np.nditer((rhos, thetas)):
-            line = Line(float(rho), float(theta), sigma=self.config.inv_sigma**-1)
-            line_model = LineProfile(exposure.image.array, weights, line=line, detectionMask=detected_mask)
-            if line_model.modelFailure or line_model.lineMask.sum() == 0:
-                continue
-
-            fit, failure = line_model.fit(self.config.dchi2_tolerance, maxIter=self.config.max_fit_iter)
-
-            if (abs(fit.rho - line.rho) > 2 * self.config.rho_bin_size) or (
-                abs(fit.theta - line.theta) > 2 * self.config.theta_bin_size
-            ):
-                failure = True
-
-            if failure:
-                continue
-
-            line_model.setLineMask(fit, self.config.max_streak_width, self.config.nsigma_mask)
-            final_model = line_model.makeProfile(fit)
-            model_maximum = abs(final_model).max()
-            final_line_mask = abs(final_model) > self.config.footprint_threshold
-            if not final_line_mask.any():
-                continue
-
-            kht_line = Line2D(fit.rho, fit.theta * geom.degrees)
-            det_line = kht_line.translated(shift)
-            line_segment = det_line.intersection(box)
+            kht_line = Line2D(rho, theta * geom.degrees)
+            line = kht_line.translated(shift)
+            line_segment = line.intersection(box)
             if line_segment is None:
                 continue
 
-            center = line_segment.center
-
-            footprint_mask = afwImage.Mask(final_line_mask.astype(np.int32))
-            spans = afwGeom.SpanSet.fromMask(footprint_mask)
-            footprint = afwDetect.Footprint(spans)
-
             streak = StreakAdapter(streaks.addNew())
             streak.setLineSegment(line_segment)
-            streak.setFootprint(footprint)
-            if wcs is not None:
-                streak.setCoord(wcs.pixelToSky(center))
+
+            center = line_segment.center
             streak["line_center_x"] = center.getX()
             streak["line_center_y"] = center.getY()
-            streak["line_sigma"] = fit.sigma
-            streak["line_reduced_chi2"] = fit.reducedChi2
-            streak["line_model_maximum"] = float(model_maximum)
+            if wcs is not None:
+                streak.setCoord(wcs.pixelToSky(center))
 
         self.log.info("Accepted %d streak(s) after profile fitting", len(streaks))
 
