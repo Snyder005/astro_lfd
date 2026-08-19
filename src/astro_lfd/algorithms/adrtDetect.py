@@ -1,13 +1,19 @@
 __all__ = ["ADRTDetectConfig", "ADRTDetectTask"]
 
+import adrt
 import lsst.afw.image as afwImage
+import lsst.afw.math as afwMath
 import lsst.afw.table as afwTable
+import lsst.geom as geom
 import lsst.pex.config as pexConfig
 import lsst.pipe.base as pipeBase
 import numpy as np
 from numpy.typing import NDArray
 
 from .base import binary_dilation, get_pixel_mask, timed
+from ..geom.line import Line2D
+from ..table.streakAdapter import StreakAdapter
+
 
 class ADRTDetectConfig(pexConfig.Config):
     """Configurable parameters for `ADRTDetectTask`."""
@@ -24,14 +30,9 @@ class ADRTDetectConfig(pexConfig.Config):
         default=1,
     )
 
-    # Configuration for detection
-
-    # Configuration for postprocessing
-
 
 class ADRTDetectTask(pipeBase.Task):
-    """Detect linear features with the Approximate Discrete Radon Transform.
-    """
+    """Detect linear features with the Approximate Discrete Radon Transform."""
 
     ConfigClass = ADRTDetectConfig
     _DefaultName = "adrtDetect"
@@ -58,6 +59,8 @@ class ADRTDetectTask(pipeBase.Task):
 
             ``streaks``
                 Catalog of detected streaks (`lsst.afw.table.SourceCatalog`).
+            ``imarr``
+                Image array with invalid regions masked (`numpy.ndarray`).
             ``timings``
                 Computing times for each processing step (`dict`)
         """
@@ -67,7 +70,7 @@ class ADRTDetectTask(pipeBase.Task):
         rhos, thetas = self.detect(imarr)
         self.postprocess(streaks, exposure, rhos=rhos, thetas=thetas)
 
-        return pipeBase.Struct(streaks=streaks, timings=self.timings)
+        return pipeBase.Struct(streaks=streaks, imarr=imarr, timings=self.timings)
 
     @timed("preprocess")
     def preprocess(self, exposure: afwImage.ExposureF) -> NDArray[np.float64]:
@@ -80,7 +83,7 @@ class ADRTDetectTask(pipeBase.Task):
 
         Returns
         -------
-        imarr : `numpy.ndarray`, (Ny, Nx)
+        imarr : `numpy.ndarray`
             The image array with invalid regions masked.
         """
         mi = afwMath.binImage(exposure.maskedImage, self.config.bin_size)
@@ -93,7 +96,7 @@ class ADRTDetectTask(pipeBase.Task):
 
         padded_imarr = np.pad(
             imarr,
-            ((0, 4096 // config_bin_size - imarr.shape[0]), (0, 0)),
+            ((0, 4096 // self.config.bin_size - imarr.shape[0]), (0, 0)),
             mode="constant",
             constant_values=0.0,
         )
@@ -109,21 +112,21 @@ class ADRTDetectTask(pipeBase.Task):
 
         Parameters
         ----------
-        imarr : `numpy.ndarray`, (Ny, Nx)
+        imarr : `numpy.ndarray`
             The masked image array.
 
         Returns
         -------
-        rhos, thetas : `numpy.ndarray`
+        rhos, thetas : `numpy.ndarray`, (N,)
             The Hesse normal form rho and theta parameters of the detected
             lines.
         """
         adrt_result = adrt.adrt(imarr)
 
         # Peak detector (to be developed fully)
-        peaks = self._find_peaks(adrt_result)
+        rhos, thetas = self._find_peaks(adrt_result)
 
-        return peaks.rho, peaks.theta
+        return rhos, thetas
 
     @timed("postprocess")
     def postprocess(
@@ -157,7 +160,7 @@ class ADRTDetectTask(pipeBase.Task):
         wcs = exposure.getWcs()
         for rho, theta in np.nditer((rhos, thetas)):
             line = Line2D(rho, theta * geom.radians)
-            line_segment = line.intersection(box)
+            line_segment = line.clipped_to(box)
             if line_segment is None:
                 continue
 
@@ -172,7 +175,10 @@ class ADRTDetectTask(pipeBase.Task):
 
         self.log.info("Accepted %d streak(s) after profile fitting", len(streaks))
 
-    def _find_peaks(self, adrt_result: NDArray[np.float64]):
+    def _find_peaks(
+        self,
+        adrt_result: NDArray[np.float64],
+    ) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
         """Placeholder for peak finding in the ADRT transform space.
 
         Will eventually detect multiple peaks, which are then transformed and
@@ -189,36 +195,21 @@ class ADRTDetectTask(pipeBase.Task):
         Returns
         -------
         rhos, thetas : `numpy.ndarray`, (N,)
-            The Hesse normal form rho and theta parameters of the detected
-            lines.
+            The Hesse normal form rho and theta (in rad) parameters of the
+            detected lines.
         """
-        # Get global maximum indices
+        # Get global maximum indices (placeholder for multpeak finding)
         q, h, s = np.unravel_index(np.argmax(adrt_result), adrt_result.shape)
 
-        # Given the image dimensions N x N, get the offset and angle coordinate arrays 
-        # for the corresponding Radon transform space
-        N = adrt_result.shape[2] 
+        # Get window around global indices (to be used in ADRT space analysis)
+
+        N = adrt_result.shape[2]
+        c = (N - 1) / 2.0
         offset, angle = adrt.utils.coord_adrt(N)
 
-        # Proposed conversions 
-        # 1. Get offset corresponding to the peak coordinates (q, h, s)
-        # 2. Scale by N (see https://adrt.readthedocs.io/en/latest/examples.coordinate.html)
-        # 3. Multiply by -1 because geometric orientation is default, not origin="lower"
-        rho = offset[q, h, s] * N * -1.0
-        
-        # 1. Get theta correspond to the peak coordinates (q, 0, s)
-        # Note: This only depends on quadrant and slope, not height
-        # 2. Derive mapping from the angle (measured as between x-axis and the 
-        # line, NOT typical Hough). This seems to be pi/2 minus the angle (but
-        # have not tried all cases).
-        theta = np.pi / 2 - angle[q, 0, s] # in radians
+        theta = np.pi / 2 - angle[q, 0, s]
+        rho_center_binned = offset[q, h, s] * N * -1.0
+        rho_binned = rho_center_binned + c * (np.cos(theta) + np.sin(theta))
+        rho = rho_binned * self.config.bin_size  # May move bin size rescaling
 
-        # Return should be rho (in pixels) and theta (in radians) in Hesse
-        # normal, but with origin at image center:
-        # - This is NOT the exposure bounding box center 
-        # (`exposure.getBBox().getCenter()`) because the exposure has been
-        # padded.
-        # - The ADRT result, including the offset/angle coordinate arrays are
-        # for a potentially binned image.
-        # This is not in the correct form yet (PIXEL coordinate system origin).
         return np.array(rho), np.array(theta)

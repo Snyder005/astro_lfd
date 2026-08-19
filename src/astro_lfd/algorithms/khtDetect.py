@@ -247,7 +247,7 @@ class KHTDetectTask(pipeBase.Task):
         for rho, theta in np.nditer((rhos, thetas)):
             kht_line = Line2D(rho, theta * geom.degrees)
             line = kht_line.translated(shift)
-            line_segment = line.intersection(box)
+            line_segment = line.clipped_to(box)
             if line_segment is None:
                 continue
 

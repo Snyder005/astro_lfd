@@ -59,12 +59,12 @@ class StreakAdapter:
         Returns
         -------
         line_segment : `astro_lfd.geom.LineSegment2D`
-            The line segment defined by the line plus ``line_u_center`` and
+            The line segment defined by the line plus ``line_s_center`` and
             ``line_length``.
         """
         return LineSegment2D.from_center_length(
             line=self.getLine(),
-            u_center=self["line_u_center"],
+            s_center=self["line_s_center"],
             length=self["line_length"],
         )
 
@@ -78,7 +78,7 @@ class StreakAdapter:
         """
         self["line_rho"] = line_segment.rho
         self["line_theta"] = line_segment.theta
-        self["line_u_center"] = line_segment.interval.center
+        self["line_s_center"] = line_segment.interval.center
         self["line_length"] = line_segment.length
 
     def getFootprint(self) -> afwDetect.Footprint:
@@ -138,7 +138,7 @@ class StreakAdapter:
             type=geom.Angle,
         )
         schema.addField(
-            "line_u_center",
+            "line_s_center",
             doc="Center point of the line segment.",
             type=np.float64,
             units="pixel",
