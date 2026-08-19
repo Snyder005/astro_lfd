@@ -126,7 +126,7 @@ class ADRTDetectTask(pipeBase.Task):
         # Peak detector (to be developed fully)
         rhos, thetas = self._find_peaks(adrt_result)
 
-        return rhos, thetas
+        return rhos * self.config.bin_size, thetas
 
     @timed("postprocess")
     def postprocess(
@@ -175,6 +175,34 @@ class ADRTDetectTask(pipeBase.Task):
 
         self.log.info("Accepted %d streak(s) after profile fitting", len(streaks))
 
+    def _adrt_to_hesse(self, q: int, h: int, s: int, N: int) -> tuple[float, float]:
+        """Convert ADRT coordinates to Hesse normal form parameters.
+
+        Hesse normal parameters are defined in the PIXEL coordinate system.
+        This currently only operates on a single set of ADRT coordinates, but
+        it should be vectorized to quickly convert multiple ADRT coordinates.
+
+        Parameters
+        ----------
+        q, h, s : `int`
+            The ADRT result quadrant, slope, and height indices.
+        N : `int`
+            Size of the ADRT domain (must be a power of 2).
+
+        Returns
+        -------
+        rho, theta : `float`
+            The Hesse normal form rho and theta (in rad) parameters.
+        """
+        c = (N - 1) / 2.0
+        offset, angle = adrt.utils.coord_adrt(N)  # This may be slowest part
+
+        theta = np.pi / 2 - angle[q, 0, s]
+        rho_center = offset[q, h, s] * N * -1.0
+        rho = rho_center + c * (np.cos(theta) + np.sin(theta))
+
+        return rho, theta
+
     def _find_peaks(
         self,
         adrt_result: NDArray[np.float64],
@@ -182,15 +210,14 @@ class ADRTDetectTask(pipeBase.Task):
         """Placeholder for peak finding in the ADRT transform space.
 
         Will eventually detect multiple peaks, which are then transformed and
-        packaged into a form to send to postprocessing.
-
-        See https://adrt.readthedocs.io/en/latest/examples.coordinate.html for
-        reference.
+        packaged into a form to send to postprocessing. Focus on
+        implementation first, then decide optimizations (within Python or as
+        an extension to a branch of `adrt` if C++ implementation needed).
 
         Parameters
         ----------
         adrt_result : `numpy.ndarray`
-            Result of ADRT transformation.
+            The ADRT result.
 
         Returns
         -------
@@ -202,14 +229,9 @@ class ADRTDetectTask(pipeBase.Task):
         q, h, s = np.unravel_index(np.argmax(adrt_result), adrt_result.shape)
 
         # Get window around global indices (to be used in ADRT space analysis)
+        # Not Implemented Yet
 
         N = adrt_result.shape[2]
-        c = (N - 1) / 2.0
-        offset, angle = adrt.utils.coord_adrt(N)
-
-        theta = np.pi / 2 - angle[q, 0, s]
-        rho_center_binned = offset[q, h, s] * N * -1.0
-        rho_binned = rho_center_binned + c * (np.cos(theta) + np.sin(theta))
-        rho = rho_binned * self.config.bin_size  # May move bin size rescaling
+        rho, theta = self._adrt_to_hesse(q, h, s, N)
 
         return np.array(rho), np.array(theta)
