@@ -175,34 +175,6 @@ class ADRTDetectTask(pipeBase.Task):
 
         self.log.info("Accepted %d streak(s) after profile fitting", len(streaks))
 
-    def _adrt_to_hesse(self, q: int, h: int, s: int, N: int) -> tuple[float, float]:
-        """Convert ADRT coordinates to Hesse normal form parameters.
-
-        Hesse normal parameters are defined in the PIXEL coordinate system.
-        This currently only operates on a single set of ADRT coordinates, but
-        it should be vectorized to quickly convert multiple ADRT coordinates.
-
-        Parameters
-        ----------
-        q, h, s : `int`
-            The ADRT result quadrant, slope, and height indices.
-        N : `int`
-            Size of the ADRT domain (must be a power of 2).
-
-        Returns
-        -------
-        rho, theta : `float`
-            The Hesse normal form rho and theta (in rad) parameters.
-        """
-        c = (N - 1) / 2.0
-        offset, angle = adrt.utils.coord_adrt(N)  # This may be slowest part
-
-        theta = np.pi / 2 - angle[q, 0, s]
-        rho_center = offset[q, h, s] * N * -1.0
-        rho = rho_center + c * (np.cos(theta) + np.sin(theta))
-
-        return rho, theta
-
     def _find_peaks(
         self,
         adrt_result: NDArray[np.float64],
@@ -232,6 +204,35 @@ class ADRTDetectTask(pipeBase.Task):
         # Not Implemented Yet
 
         N = adrt_result.shape[2]
-        rho, theta = self._adrt_to_hesse(q, h, s, N)
+        rho, theta = _adrt_to_hesse(q, h, s, N)
 
         return np.array(rho), np.array(theta)
+
+
+def _adrt_to_hesse(q: int, h: int, s: int, N: int) -> tuple[float, float]:
+    """Convert ADRT coordinates to Hesse normal form parameters.
+
+    Hesse normal parameters are defined in the PIXEL coordinate system. This
+    currently only operates on a single set of ADRT coordinates, but it should
+    be vectorized to quickly convert multiple ADRT coordinates.
+
+    Parameters
+    ----------
+    q, h, s : `int`
+        The ADRT result quadrant, slope, and height indices.
+    N : `int`
+        Size of the ADRT domain (must be a power of 2).
+
+    Returns
+    -------
+    rho, theta : `float`
+        The Hesse normal form rho and theta (in rad) parameters.
+    """
+    c = (N - 1) / 2.0
+    offset, angle = adrt.utils.coord_adrt(N)  # This may be slowest part
+
+    theta = np.pi / 2 - angle[q, 0, s]
+    rho_center = offset[q, h, s] * N * -1.0
+    rho = rho_center + c * (np.cos(theta) + np.sin(theta))
+
+    return rho, theta
