@@ -85,6 +85,7 @@ is fast, and self-heals when the `w_latest` target changes.
 # The loader auto-sources the cached stack env. Verify it took:
 which python                         # expect .../lsst-scipipe-*/bin/python
 python -c "import numpy, lsst.afw.image; print(numpy.__version__, 'stack OK')"
+python -c "import astro_lfd, adrt; print('astro_lfd + adrt OK', adrt.__version__)"
 ```
 
 If that shows `/usr/bin/python` / numpy ~1.23 / `No module named 'lsst'`, the
