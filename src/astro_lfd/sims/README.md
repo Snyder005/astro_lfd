@@ -19,6 +19,23 @@ implements a default profile of a top-hat convolved with a Gaussian. The method
 `get_signal()` accepts a 2-D array shape and calculates the signal at each
 pixel given its distance from the streak.
 
+A streak is infinite by default. Supplying `length` (and optionally `s_center`)
+constrains it to a finite segment. `get_signal()` works entirely in the
+tangent–normal frame of the line: the transverse coordinate (perpendicular
+distance) drives the cross-sectional width profile as before, and the
+along-line coordinate drives an identical longitudinal profile gated by
+`length`. Both axes share the `_box`/`_blurred_box` helpers, so a finite streak
+is a soft-edged rectangle whose ends taper with the same PSF sigma as its
+sides. `length=None` skips the longitudinal factor entirely, reproducing the
+original infinite-line output exactly.
+
+The `Streak.from_center_length()` constructor is the intuitive way to place a
+finite streak — by a center point in the PIXEL frame plus an orientation and
+length — and converts to the stored Hesse `rho`/`theta`/`s_center` via
+`astro_lfd.geom.Line2D`. This is the *only* LSST touch point in `streak.py`: it
+is lazy-imported inside that method so the module and `get_signal()` stay
+stack-independent, preserving the numpy-only simulation path.
+
 ## Design Decisions
 
 The radiometric simulation is always done in **electrons** because the noise

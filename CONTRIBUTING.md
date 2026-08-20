@@ -104,18 +104,19 @@ behalf.
 
 ### Verify
 
+There is no full pytest suite yet. Primary verification is that the Python
+version and all dependency imports resolve at their stack-linked versions:
+
 ```bash
-python -c "import numpy, scipy; print('core OK')"
+python -V                                                    # 3.13.x
+python -c "import numpy, scipy; print(numpy.__version__)"    # numpy 2.2.x
 python -c "import skimage, sklearn; print('kht deps OK')"    # if kht extra installed
 python -c "import adrt; print('adrt', adrt.__version__)"     # if adrt extra installed; expect 1.2.0
 python -c "import lsst.kht, lsst.afw.image, lsst.pipe.base; print('stack OK')"  # needs the stack
-python -m pytest tests/ -q                                   # 48 passed
-black --line-length 110 --check src/ tests/
-mypy src/astro_lfd
+python -c "import astro_lfd; print('astro_lfd OK')"          # user-site editable install
+black --line-length 110 --check src/                         # lint
+mypy src/astro_lfd                                           # type-check
 ```
-
-The afw FITS tests are skipped automatically when `lsst.afw.image` is
-unavailable (e.g. outside the stack), so the core suite still runs.
 
 ## Speeding up the LSST stack for Claude Code (optional)
 

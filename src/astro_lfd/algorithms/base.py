@@ -1,15 +1,14 @@
+__all__ = ["binary_dilation", "get_pixel_mask", "HasTimings", "timed"]
+
 from collections.abc import Callable
 from functools import wraps
 from time import perf_counter
-from typing import Concatenate, ParamSpec, Protocol, TypeVar
+from typing import Concatenate, Protocol
 
+import lsst.afw.image as afwImage
 import numpy as np
 from numpy.typing import NDArray
 from scipy.ndimage import distance_transform_edt
-
-import lsst.afw.image as afwImage
-
-__all__ = ["binary_dilation", "get_pixel_mask", "HasTimings", "timed"]
 
 
 class HasTimings(Protocol):

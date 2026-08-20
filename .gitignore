@@ -9,3 +9,6 @@ dist/
 .mypy_cache/
 .pytest_cache/
 .ipynb_checkpoints/
+
+# Devel
+devel/
