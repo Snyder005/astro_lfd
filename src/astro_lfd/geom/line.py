@@ -382,7 +382,7 @@ class Line2D(LineGeometry2D):
         does_contain : `bool`
             `True` if the point lies on the line geometry, `False` if not.
         """
-        return abs(self.signed_distance(point)) <= atol
+        return abs(self.normal_coordinate(point)) <= atol
 
     def boundary_intersections(
         self,
@@ -489,7 +489,7 @@ class LineSegment2D(LineGeometry2D):
             An instance of `LineSegment2D` defined by the two points.
         """
         line = Line2D.from_points(p0, p1)
-        interval = geom.IntervalD.fromSpannedPoints([line.project(p0), line.project(p1)])
+        interval = geom.IntervalD.fromSpannedPoints([line.along_coordinate(p0), line.along_coordinate(p1)])
 
         return cls(line, interval)
 
@@ -594,7 +594,7 @@ class LineSegment2D(LineGeometry2D):
         if not self.line.contains(point, atol=atol):
             return False
 
-        s = self.line.project(point)
+        s = self.line.along_coordinate(point)
         return (self.interval.min - atol) <= s <= (self.interval.max + atol)
 
     def boundary_intersections(
