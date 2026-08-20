@@ -84,7 +84,7 @@ class SimulatedImage:
         return cls(d["image"], d["variance"], d["mask"], ast.literal_eval(str(d["meta"])))
 
     @classmethod
-    def simulate_exposure(
+    def simulate(
         cls,
         streak: Streak,
         band: str = "r",
@@ -130,7 +130,7 @@ class SimulatedImage:
             The simulated image with its variance and mask planes.
         """
         sky = SKY_COUNTS[band]
-        signal = streak.get_signal(fwhm / pixel_scale, shape)
+        signal = streak.get_signal(shape, fwhm=fwhm / pixel_scale)
         rng = np.random.default_rng(seed)
 
         image = rng.normal(0.0, read_noise, size=shape)

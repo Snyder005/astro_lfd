@@ -14,15 +14,15 @@ class Streak:
 
     Parameters
     ----------
-    theta : `float`
-        The angle of the line normal vector, in degrees.
     rho : `float`
         The signed perpendicular distance from the origin to the line, in
         pixels.
-    width : `float`
-        Top-hat full width of the streak, in pixels.
+    theta : `float`
+        The angle of the line normal vector, in degrees.
     peak_signal : `float`
-        Signal at the ridge center.
+        The signal at the line center.
+    width : `float`
+        The top-hat full width of the streak, in pixels.
     """
 
     rho: float
@@ -32,18 +32,18 @@ class Streak:
 
     def get_signal(
         self,
-        fwhm: float,
         shape: tuple[int, int],
+        fwhm: float | None = None
     ) -> NDArray[np.float64]:
         """Calculate the noise-free streak signal at each pixel from its
         distance from the line.
 
         Parameters
         ----------
-        fwhm : `float`
-            The PSF full-width-at-half-maximum, in pixels.
         shape : `tuple` [`int`]
             A tuple of the array dimensions.
+        fwhm : `float` or None
+            The PSF full-width-at-half-maximum, in pixels (None, by default).
 
         Returns
         -------
@@ -54,9 +54,29 @@ class Streak:
         gy, gx = np.ogrid[:ny, :nx]
         theta = np.deg2rad(self.theta)
         distance = gx * np.cos(theta) + gy * np.sin(theta) - self.rho
-        sigma = fwhm * FWHM_TO_SIGMA
 
-        return self._blurred_box(distance, sigma) * self.peak_signal
+        if fwhm is None:
+            return self._box(distance) * self.peak_signal
+
+        else:
+            sigma = fwhm * FWHM_TO_SIGMA
+            return self._blurred_box(distance, sigma) * self.peak_signal
+
+    def _box(self, d: NDArray[np.float64]) -> NDArray[np.float64]:
+        """Top-hat cross-sectional profile, peak-normalized to 1.
+
+        Parameters
+        ----------
+        d : `numpy.ndarray`
+            The signed perpendicular distance from the line, in pixels.
+
+        Returns
+        -------
+        normalized_profile : `numpy.ndarray`
+            Normalized profile values at each distance. Equal to 1 along the
+            top-hat width.
+        """
+        return (np.abs(d) <= self.width / 2).astype(np.float64)
 
     def _blurred_box(
         self,
