@@ -123,9 +123,15 @@ class ADRTDetectTask(pipeBase.Task):
         """
         adrt_result = adrt.adrt(imarr)
 
-        # Peak detector (to be developed fully)
+        # Peak detector (to be developed fully). Returns Hesse parameters in
+        # the binned/padded pixel grid the ADRT actually ran on; the transform
+        # is deliberately agnostic to preprocessing.
         rhos, thetas = self._find_peaks(adrt_result)
 
+        # Undo binning here (outside the ADRT coordinate transform): binning is
+        # an isotropic rescale of rho only and leaves theta unchanged, so it
+        # belongs with the other array-frame -> PIXEL-frame corrections (e.g.
+        # XY0) in the caller rather than inside the transform utilities.
         return rhos * self.config.bin_size, thetas
 
     @timed("postprocess")
@@ -204,35 +210,139 @@ class ADRTDetectTask(pipeBase.Task):
         # Not Implemented Yet
 
         N = adrt_result.shape[2]
-        rho, theta = _adrt_to_hesse(q, h, s, N)
+        rhos, thetas = _adrt_to_hesse(q, h, s, N)
 
-        return np.array(rho), np.array(theta)
+        return rhos, thetas
 
 
-def _adrt_to_hesse(q: int, h: int, s: int, N: int) -> tuple[float, float]:
+def _adrt_to_hesse(
+    q: NDArray[np.integer] | int,
+    h: NDArray[np.floating] | float,
+    s: NDArray[np.floating] | float,
+    N: int,
+) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
     """Convert ADRT coordinates to Hesse normal form parameters.
 
-    Hesse normal parameters are defined in the PIXEL coordinate system. This
-    currently only operates on a single set of ADRT coordinates, but it should
-    be vectorized to quickly convert multiple ADRT coordinates.
+    This is the analytic, vectorized inverse of `_hesse_to_adrt`. It maps the
+    ADRT quadrant/height/slope indices ``(q, h, s)`` returned by a peak finder
+    directly to Hesse normal ``(rho, theta)`` parameters, reproducing
+    `adrt.utils.coord_adrt` in closed form (to floating-point precision) rather
+    than building and indexing its full coordinate tables. Being analytic, it
+    also accepts *fractional* ``h`` and ``s`` from sub-pixel peak refinement,
+    which the integer-indexed table lookup cannot.
+
+    The returned parameters are in the pixel grid the ADRT ran on (the binned,
+    zero-padded array). This utility is intentionally agnostic to preprocessing:
+    undoing binning and applying any ``XY0`` origin offset to reach the true
+    LSST PIXEL frame is the caller's responsibility (see `detect`). Padding is
+    already accounted for via ``N`` and only enlarges the domain along the
+    bottom rows, so it does not move the origin.
 
     Parameters
     ----------
-    q, h, s : `int`
-        The ADRT result quadrant, slope, and height indices.
+    q : `numpy.ndarray` or `int`
+        The ADRT result quadrant index/indices (0-3).
+    h, s : `numpy.ndarray` or `float`
+        The ADRT result height and slope index/indices. May be fractional
+        (sub-pixel).
     N : `int`
         Size of the ADRT domain (must be a power of 2).
 
     Returns
     -------
-    rho, theta : `float`
-        The Hesse normal form rho and theta (in rad) parameters.
+    rho, theta : `numpy.ndarray`
+        The Hesse normal form rho (pixels) and theta (radians) parameters,
+        broadcast to the common shape of ``q``, ``h``, ``s``.
     """
+    q = np.asarray(q)
+    h = np.asarray(h, dtype=np.float64)
+    s = np.asarray(s, dtype=np.float64)
     c = (N - 1) / 2.0
-    offset, angle = adrt.utils.coord_adrt(N)  # This may be slowest part
 
-    theta = np.pi / 2 - angle[q, 0, s]
-    rho_center = offset[q, h, s] * N * -1.0
-    rho = rho_center + c * (np.cos(theta) + np.sin(theta))
+    # Base digital-line geometry from the slope index (coord_adrt internals).
+    ns = s / (N - 1)
+    ts = np.arctan(ns)
+    cs = np.cos(ts) + np.sin(ts)
+
+    # Fractional Radon-domain offset from the height index.
+    hi = 1.0 - (2.0 * h + 1.0) / (2.0 * N)
+    h0 = ((hi + ((2.0 * N - 1.0) / (2.0 * N)) * ns) / (1.0 + ns) - 0.5) * cs
+
+    # Quadrant selects the sign of the offset and the line angle. Even
+    # quadrants (0, 2) keep the offset sign; odd quadrants (1, 3) flip it.
+    offset = np.where(q % 2 == 0, h0, -h0)
+    angle = np.select(
+        [q == 0, q == 1, q == 2, q == 3],
+        [ts - np.pi / 2.0, -ts, ts, np.pi / 2.0 - ts],
+    )
+
+    # Line angle -> normal-vector angle, then Radon offset -> PIXEL rho with the
+    # image-center -> corner-origin recenter (see devel/adrt_coordinate_transform.md).
+    theta = np.pi / 2.0 - angle
+    rho = -offset * N + c * (np.cos(theta) + np.sin(theta))
 
     return rho, theta
+
+
+def _hesse_to_adrt(
+    rho: NDArray[np.floating] | float,
+    theta: NDArray[np.floating] | float,
+    N: int,
+) -> tuple[NDArray[np.float64], NDArray[np.float64], NDArray[np.float64]]:
+    """Convert Hesse normal form parameters to ADRT coordinates.
+
+    Analytic, vectorized inverse of `_adrt_to_hesse`: maps Hesse normal
+    ``(rho, theta)`` (in the ADRT's binned/padded pixel grid) back to ADRT
+    quadrant/height/slope indices ``(q, h, s)``. Returns floating-point indices
+    so sub-pixel positions are preserved.
+
+    ``theta`` is reduced modulo ``pi`` (Hesse lines are undirected). The
+    round-trip is exact in the interior; it is degenerate only on the
+    quadrant-boundary angles (0, 45, 90, 135 deg, i.e. ``s == 0`` and
+    ``s == N - 1``), where adjacent ADRT quadrants share the same slope and the
+    quadrant assignment is a convention choice.
+
+    Parameters
+    ----------
+    rho, theta : `numpy.ndarray` or `float`
+        The Hesse normal form rho (pixels) and theta (radians) parameters.
+    N : `int`
+        Size of the ADRT domain (must be a power of 2).
+
+    Returns
+    -------
+    q, h, s : `numpy.ndarray`
+        The ADRT quadrant, height, and slope indices, broadcast to the common
+        shape of ``rho`` and ``theta``. ``q`` is integer-valued; ``h`` and
+        ``s`` may be fractional.
+    """
+    rho = np.asarray(rho, dtype=np.float64)
+    theta = np.asarray(theta, dtype=np.float64)
+    c = (N - 1) / 2.0
+
+    # Reduce to [0, pi) and pick the quadrant + base line angle. The four ADRT
+    # quadrants tile [0, pi) in normal-vector angle as: [0, pi/4)->3,
+    # [pi/4, pi/2)->2, [pi/2, 3pi/4)->1, [3pi/4, pi)->0.
+    th = np.mod(theta, np.pi)
+    conds = [th < np.pi / 4.0, th < np.pi / 2.0, th < 3.0 * np.pi / 4.0]
+    q = np.select(conds, [3, 2, 1], default=0)
+    ts = np.select(
+        conds,
+        [th, np.pi / 2.0 - th, th - np.pi / 2.0],
+        default=np.pi - th,
+    )
+
+    # Invert the slope geometry.
+    ns = np.tan(ts)
+    s = ns * (N - 1)
+    cs = np.cos(ts) + np.sin(ts)
+
+    # Invert the rho recenter/scale to recover the Radon offset, undo the
+    # quadrant sign flip, then invert the height mapping. Trig uses `th` so it
+    # is consistent with the quadrant reduction above.
+    offset = (c * (np.cos(th) + np.sin(th)) - rho) / N
+    h0 = np.where(q % 2 == 0, offset, -offset)
+    hi = (h0 / cs + 0.5) * (1.0 + ns) - ((2.0 * N - 1.0) / (2.0 * N)) * ns
+    h = N * (1.0 - hi) - 0.5
+
+    return q.astype(np.float64), h, s
