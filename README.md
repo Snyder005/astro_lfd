@@ -19,15 +19,14 @@ template, so a new method can be added by swapping only the line-finding core:
 
 ```
 src/astro_lfd/
-├── geom/    # line geometry / coordinate conventions
-├── meas/    # measurement of detected features
-├── pipe/    # LSST Science Pipelines tasks / drivers
-├── table/   # detection output tables
-└── utils/   # helpers, incl. synthetic test-image generation (testdata.py)
-docs/        # unified LFD_DESIGN.md + per-detector docs/detectors/<method>/
-knowledge/   # progressively-refined knowledge base (read INDEX.md first)
-notebooks/   # scratch notebooks for testing and development
-tests/       # unit tests
+├── geom/       # line geometry / coordinate conventions
+├── algorithms/ # measurement of detected features
+├── tasks/      # LSST Science Pipelines tasks / drivers
+├── table/      # detection output tables
+└── sim/        # simulated test-image generation
+docs/           # unified LFD_DESIGN.md + per-detector docs/detectors/<method>/
+tests/          # unit tests (Not implemented yet)
+devel/          # scratch area for development notes, scripts, and data
 ```
 
 ## Install
@@ -50,5 +49,5 @@ early numpy-level work can run without the stack.
 python -m pytest tests/ -q
 ```
 
-The optional `lsst.afw.image` FITS tests are skipped automatically when the LSST
-stack is unavailable.
+Currently unit tests have not been integrated; this will be done in a separate
+issue.
