@@ -121,9 +121,9 @@ class StreakAdapter:
         -------
         schema : `lsst.afw.table.Schema`
             A minimal source schema extended with ``line_rho``,
-            ``line_theta``, ``line_u_center``, ``line_length``, the profile-fit
-            quality fields ``line_sigma``, ``line_reduced_chi2``, and
-            ``line_model_maximum``, and a ``line_center`` centroid key.
+            ``line_theta``, ``line_s_center``, ``line_length``, ``line_width``,
+            the profile-fit quality fields ``line_sigma``, ``line_reduced_chi2``,
+            and ``line_model_maximum``, and a ``line_center`` centroid key.
         """
         schema = afwTable.SourceTable.makeMinimalSchema()
         schema.addField(
@@ -146,6 +146,12 @@ class StreakAdapter:
         schema.addField(
             "line_length",
             doc="Length of the line segment.",
+            type=np.float64,
+            units="pixel",
+        )
+        schema.addField(
+            "line_width",
+            doc="Transverse width of the line segment.",
             type=np.float64,
             units="pixel",
         )

@@ -1,4 +1,4 @@
-# ADRT butterfly analysis — implementation plan (for review)
+# ADRT butterfly analysis — implementation plan
 
 Plan to turn the validated closed-form result in [`butterfly.md`](butterfly.md)
 into a reusable analysis that estimates line-segment geometry
@@ -7,9 +7,31 @@ accumulator around a detected peak. This is the ADRT counterpart of the
 Xu–Shin–Klette Hough butterfly, and it slots into the existing `ADRTDetectTask`
 between peak finding and post-processing.
 
-- **Status:** proposal for review. No code written yet.
+- **Status:** steps 1–3 implemented (2026-08-22). The estimator, tests, and task
+  wiring are in place; width-bias/PSF calibration (step 6) and robust accumulator
+  conditioning remain.
 - **Depends on:** the closed-form derivation and inversion in
   [`butterfly.md`](butterfly.md) (validated in `devel/butterfly_closed_form.py`).
+
+## Implementation status
+
+- **Done:** `ADRTSegmentEstimate`, `estimate_segment_adrt`,
+  `_column_moments_continuous`, `_invert_inertia` in
+  `src/astro_lfd/algorithms/adrtDetect.py`; `_find_peaks` returns integer
+  `(q, h, s)` peaks; `detect` runs the estimator and applies `bin_size` scaling
+  via `_apply_bin_size`; `postprocess` builds a `LineSegment2D` from
+  center/angle/length and persists `line_width` (added to the schema in
+  `streakAdapter.py`). Tests in `tests/test_adrt_butterfly.py` (53 cases): pure
+  inversion is exact; on clean signal length < 1 %, angle < 0.05°, width within
+  the additive bias; the full `run()` path recovers θ=115.000°, length≈1498,
+  width≈8.19 on a noise-free exposure.
+- **Known gap (deferred):** on a *noisy full-frame* exposure the estimate is
+  dominated by background integrated along the 4096-pixel lines (the
+  isolated-segment caveat, [`butterfly.md`](butterfly.md) §6.3). The estimator is
+  correct given a conditioned accumulator; robust accumulator conditioning
+  (sky-subtracted/significance input per `design.md` Steps 0–1, matched-filter +
+  ridge windowing per Step 4) and multi-peak detection (issue #7) are the
+  prerequisites for real data and are tracked separately.
 
 ---
 
