@@ -149,12 +149,16 @@ class StreakAdapter:
             type=np.float64,
             units="pixel",
         )
+
+        # Fields populated by ADRT butterfly analysis
         schema.addField(
             "line_width",
             doc="Transverse width of the line segment.",
             type=np.float64,
             units="pixel",
         )
+
+        # Fields populated by KHT model fit
         schema.addField(
             "line_sigma",
             doc="Moffat sigma (width) parameter of the fit line profile.",
