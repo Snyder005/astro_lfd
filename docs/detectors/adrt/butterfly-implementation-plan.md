@@ -7,24 +7,39 @@ accumulator around a detected peak. This is the ADRT counterpart of the
 Xu–Shin–Klette Hough butterfly, and it slots into the existing `ADRTDetectTask`
 between peak finding and post-processing.
 
-- **Status:** steps 1–3 implemented (2026-08-22). The estimator, tests, and task
-  wiring are in place; width-bias/PSF calibration (step 6) and robust accumulator
-  conditioning remain.
+- **Status:** steps 1–3 implemented (2026-08-22); extractor simplified and
+  moments-first (2026-09-02). Width-bias/PSF calibration (step 6) and robust
+  accumulator conditioning remain.
 - **Depends on:** the closed-form derivation and inversion in
   [`butterfly.md`](butterfly.md) (validated in `devel/butterfly_closed_form.py`).
 
 ## Implementation status
 
-- **Done:** `ADRTSegmentEstimate`, `estimate_segment_adrt`,
-  `_column_moments_continuous`, `_invert_inertia` in
+- **Done:** `ADRTSegment` (moments-first result), `extract_segment_adrt`,
+  `_slope_intercept_map`, `_invert_inertia` in
   `src/astro_lfd/algorithms/adrtDetect.py`; `_find_peaks` returns integer
-  `(q, h, s)` peaks; `detect` runs the estimator and applies `bin_size` scaling
+  `(q, h, s)` peaks; `detect` runs the extractor and applies `bin_size` scaling
   via `_apply_bin_size`; `postprocess` builds a `LineSegment2D` from
-  center/angle/length and persists `line_width` (added to the schema in
-  `streakAdapter.py`). Tests in `tests/test_adrt_butterfly.py` (53 cases): pure
-  inversion is exact; on clean signal length < 1 %, angle < 0.05°, width within
-  the additive bias; the full `run()` path recovers θ=115.000°, length≈1498,
-  width≈8.19 on a noise-free exposure.
+  center/angle and the top-hat length from `ADRTSegment.segment_dimensions()`,
+  and persists `line_width` (added to the schema in `streakAdapter.py`). Tests in
+  `tests/test_adrt_butterfly.py` (53 cases): pure inversion is exact; on clean
+  signal the recovered `(mu20, mu11, mu02)` match the known rectangle tensor,
+  length < 1 %, angle < 0.05°, width within the additive bias.
+- **Simplification (2026-09-02).** The per-column Python loop and the per-cell
+  `_adrt_to_hesse` transform were removed. The slope value is the trig-free
+  4-combo map of the slope index, and the height→intercept map is exact affine
+  (`b = α·h + β`); both are closed form in `(q, s_idx, N)` via
+  `_slope_intercept_map`, so the moment sums are fully vectorized over the slope
+  band (verified to reproduce the prior coefficients and center to
+  floating-point precision). `_adrt_to_hesse` was deleted; `_hesse_to_adrt` is
+  kept for analytic peak placement in the sim tests. The `A/B/C`, `slope`, and
+  `length`/`width` fields were dropped from the result: `(A, B, C) =
+  (mu20, −2mu11, mu02)` and the top-hat length/width are a derived
+  interpretation (`segment_dimensions`), whereas the 2-D central moments (=
+  catalog `XX, XY, YY`) are the primary product for arbitrary streak
+  morphologies. **Quadrant-agnostic reflection scheme: not implemented** — the
+  direct per-quadrant affine map is already trivial and exact, so reflecting/
+  transposing to a canonical quadrant would add indirection with no gain.
 - **Known gap (deferred):** on a *noisy full-frame* exposure the estimate is
   dominated by background integrated along the 4096-pixel lines (the
   isolated-segment caveat, [`butterfly.md`](butterfly.md) §6.3). The estimator is
@@ -40,18 +55,17 @@ between peak finding and post-processing.
 `ADRTDetectTask` (`src/astro_lfd/algorithms/adrtDetect.py`) currently does:
 
 ```
-run → preprocess → detect(_find_peaks → _adrt_to_hesse) → postprocess
+run → preprocess → detect(_find_peaks → extract_segment_adrt) → postprocess
 ```
 
-`_find_peaks` today returns only `(rho, theta)` from the global argmax, and
-`postprocess` builds a `Line2D` clipped to the bbox — so **length/width are not
-estimated at all**; the segment is just the infinite line clipped to the frame.
+`_find_peaks` returns the global-argmax peak `(q, h, s_idx)`, `detect` runs the
+butterfly extractor per peak, and `postprocess` builds a finite `LineSegment2D`
+from the recovered center/angle/length (the top-hat `segment_dimensions`).
 
-The butterfly analysis adds a stage that consumes a peak `(q, h, s_idx)` plus a
-local accumulator window and returns full segment geometry. It reuses the
-already-validated `_adrt_to_hesse` for the continuous-coordinate mapping, so it
-introduces no new coordinate math — only moment sums and the closed-form
-inversion.
+The butterfly analysis consumes a peak `(q, h, s_idx)` plus a local accumulator
+window and returns the segment moments. It uses the closed-form
+`_slope_intercept_map` for the continuous-coordinate mapping, so it introduces no
+new coordinate math — only vectorized moment sums and the closed-form inversion.
 
 ---
 
@@ -63,35 +77,35 @@ without the stack:
 
 ```python
 @dataclass
-class ADRTSegmentEstimate:
-    rho: float            # Hesse ρ (ADRT pixel grid), from refined peak column
-    theta: float          # Hesse θ (rad)
-    length: float         # px
-    width: float          # px
-    center_x: float       # px (ADRT pixel grid)
+class ADRTSegment:
+    rho: float            # Hesse ρ (ADRT pixel grid), from the fitted moments
+    theta: float          # Hesse θ (rad), line-normal angle
+    center_x: float       # px (ADRT pixel grid), first moments
     center_y: float
-    # diagnostics
-    A: float; B: float; C: float          # V(s) = A s² + B s + C
-    slope: float                          # s0 = tan(phi0)
-    var_residual: float                   # goodness of the quadratic fit
+    mu20: float           # 2-D central second moments (px²) = catalog XX/XY/YY
+    mu11: float
+    mu02: float
+    var_residual: float   # goodness of the variance-quadratic fit
     n_columns: int
 
-def estimate_segment_adrt(
+    def segment_dimensions(self, width_bias: float = 0.0) -> tuple[float, float, float]:
+        """(length, width, phi0) top-hat interpretation via _invert_inertia."""
+        ...
+
+def extract_segment_adrt(
     adrt_result: NDArray,     # (4, 2N-1, N)
     q: int, h: float, s_idx: int,   # peak (from _find_peaks)
     N: int,
     *,
     half_band: int = 90,           # slope columns each side of the peak
     background: str = "median",    # per-column background subtraction
-    subtract_width_bias: float = 0.0,   # calibrated Δ(w²) in px²
-) -> ADRTSegmentEstimate:
+) -> ADRTSegment:
     ...
 ```
 
-Placement: extend `src/astro_lfd/algorithms/adrtDetect.py` (next to
-`_adrt_to_hesse`), or a sibling `adrtButterfly.py` if it grows. Lean toward the
-same module first — it shares the transform helpers and keeps the ADRT math in
-one place.
+Placement: lives in `src/astro_lfd/algorithms/adrtDetect.py` next to
+`_slope_intercept_map` / `_hesse_to_adrt`, keeping the ADRT math in one place
+(split to a sibling `adrtButterfly.py` only if it grows).
 
 ---
 
@@ -99,26 +113,27 @@ one place.
 
 1. **Select the slope band.** Columns `s_idx − half_band … s_idx + half_band`,
    clipped to `[1, N−1]` and to the peak's quadrant (do not cross seams).
-2. **Map to continuous coordinates.** For each column, map its rows through
-   `_adrt_to_hesse(q, h_rows, s_col, N)` → `(ρ, θ)`, then
-   `s = −cosθ/sinθ`, `b = ρ/sinθ`. (θ is constant within a column.)
+2. **Map to continuous coordinates.** For the whole band at once,
+   `_slope_intercept_map(q, s_cols, N)` → `(slopes, α, β)`: the slope value
+   (quadrant 4-combo map) and the exact affine intercept map `b = α·h + β`.
 3. **Condition each column.** Subtract a local background (median of the column,
    or a windowed estimate around the ridge) so the moment sums see the segment,
    not the sky pedestal. Optionally restrict to a height window around the ridge
    centroid to limit contamination.
-4. **Column moments.** Intensity-weighted centroid `μ(s)` and variance `V(s)`
-   (the `column_moments` already prototyped, but in continuous `b`).
+4. **Column moments.** Vectorized weighted moments of the integer height index
+   per column, mapped to continuous `b`: `μ(s) = α⟨h⟩ + β`, `V(s) = α²·Var(h)`.
 5. **Fit.** Weighted least squares: linear `μ(s) = β0 + β1 s`, quadratic
    `V(s) = A s² + B s + C`. Weight by column total flux (SNR) so the peak column
    dominates and far, contaminated columns matter less.
-6. **Invert** (closed form from `butterfly.md` §3):
-   `φ0 = ½ atan2(−B, A−C)`; `L² = 6[(A+C)+√((A−C)²+B²)]`;
-   `w² = 6[(A+C)−√((A−C)²+B²)] − subtract_width_bias`;
-   `(x_c, y_c) = (−β1, β0)`.
-7. **Refine ρ, θ.** Take θ from the fitted `φ0` (normal angle = φ0 + 90°) and ρ
-   from the centroid line through `(x_c, y_c)` — a sub-pixel refinement of the
-   integer-peak `_adrt_to_hesse` output.
-8. **Package** into `ADRTSegmentEstimate` with fit diagnostics.
+6. **Identify moments.** `(A, B, C) = (μ20, −2μ11, μ02)` and
+   `(x_c, y_c) = (−β1, β0)` — the primary product. Orientation is
+   `φ0 = ½ atan2(2μ11, μ20−μ02)`, `θ = φ0 + 90°`. The top-hat length/width are a
+   derived interpretation via `ADRTSegment.segment_dimensions(width_bias)` →
+   `_invert_inertia` (closed form, `butterfly.md` §3).
+7. **Refine ρ, θ.** θ from the fitted moment tensor (normal angle = φ0 + 90°) and
+   ρ from the centroid line through `(x_c, y_c)` — a sub-pixel refinement of the
+   integer peak.
+8. **Package** into `ADRTSegment` with fit diagnostics.
 
 `postprocess` then builds a `LineSegment2D` from `(center, φ0, L)` via
 `LineSegment2D.from_center_length` (already exists) instead of clipping an
@@ -129,35 +144,34 @@ infinite line — giving true endpoints.
 ## 4. New / changed source
 
 - `src/astro_lfd/algorithms/adrtDetect.py`
-  - add `ADRTSegmentEstimate`, `estimate_segment_adrt`, and small private
-    helpers `_column_moments_continuous`, `_invert_inertia`.
-  - `_find_peaks` returns the peak indices `(q, h, s_idx)` (not just ρ,θ) so the
-    estimator can run; keep the ρ,θ path for back-compat / fallback.
-  - `detect` calls `estimate_segment_adrt` per peak, applies `bin_size` scaling
-    to `length`/`width`/`center`/`rho` (all lengths scale by `bin_size`; θ
-    unchanged), and passes segments to `postprocess`.
-  - `postprocess` consumes segments (center, angle, length, width) and writes
-    endpoints + width to the streak catalog.
-- `src/astro_lfd/table/streakAdapter.py` — add `width` (and, if not present,
-  length/endpoint) fields to the schema so the estimate is recorded. **Check the
-  current schema first**; `setLineSegment` may already carry endpoints.
+  - `ADRTSegment`, `extract_segment_adrt`, and small private helpers
+    `_slope_intercept_map`, `_invert_inertia`.
+  - `_find_peaks` returns the peak indices `(q, h, s_idx)` so the extractor can
+    run.
+  - `detect` calls `extract_segment_adrt` per peak, applies `bin_size` scaling
+    (`rho`/`center` by `bin_size`, second moments by `bin_size²`; θ unchanged),
+    and passes segments to `postprocess`.
+  - `postprocess` consumes segments (center, angle, and `segment_dimensions`
+    length/width) and writes endpoints + width to the streak catalog.
+- `src/astro_lfd/table/streakAdapter.py` — `line_width` field added to the
+  schema; `setLineSegment` carries the endpoints via ρ/θ/s_center/length.
 
 ## 5. Tests (`tests/`)
 
-- **Unit (no stack):** synthetic ADRT columns with known `(μ20, μ11, μ02)` →
-  assert `estimate_segment_adrt` inverts to the input tensor exactly.
-- **Integration (sim, needs stack):** port `devel/butterfly_closed_form.py` into
-  a parametrized test over a small `(φ0, L, w)` grid; assert
+- **Unit (no stack):** `_invert_inertia` inverts a known `(μ20, μ11, μ02)` tensor
+  to `(length, width, phi0)` exactly.
+- **Integration (sim, needs stack):** parametrized over a `(φ0, L, w)` grid;
+  assert the recovered `(μ20, μ11, μ02)` match the known rectangle tensor,
   `|ΔL|/L < 1 %`, `|Δφ0| < 0.05°`, and `|Δw|` within the calibrated bias
-  tolerance (e.g. `< 15 %` at `w ≥ 4`, tighter after bias subtraction).
+  tolerance (`< 15 %` at `w ≥ 4`, tighter after bias subtraction).
 - **Regression:** width-bias constant `w_hat² − w²` stable vs. `w` (guards the
   Sheppard-correction assumption).
 
 ## 6. Calibration work (before trusting width)
 
 - Characterize the additive `w²` bias vs. angle, quadrant, and PSF blur; store a
-  small calibration (constant or low-order in angle) and wire it into
-  `subtract_width_bias`.
+  small calibration (constant or low-order in angle) and pass it as the
+  `width_bias` argument to `segment_dimensions`.
 - Extend the derivation for a **PSF-blurred** top-hat: `Var → Var + σ_psf²` adds
   a known term to both principal moments; deconvolve when the PSF is known.
 

@@ -9,11 +9,12 @@ turns out to be **cleaner and more completely determined** than the Hough case.
 - **Status:** derived and numerically validated (2026-08-22). Continuous-slope
   moment law confirmed exact; inversion recovers geometry to sub-percent
   (length, angle) with a small, subtractable width bias.
-- **Grounding:** conventions and the analytic ADRT↔Hesse transform in
-  [`design.md`](design.md), `_adrt_to_hesse` / `_hesse_to_adrt` in
-  `src/astro_lfd/algorithms/adrtDetect.py`, and the pixel/Hesse conventions in
-  the `devel/` coordinate notes. Validation script:
-  `devel/butterfly_closed_form.py` (scratch, gitignored).
+- **Grounding:** conventions and the ADRT geometry in [`design.md`](design.md);
+  the closed-form slope/intercept map (`_slope_intercept_map`), the moment
+  extractor (`extract_segment_adrt` → `ADRTSegment`), and the analytic peak
+  placement (`_hesse_to_adrt`) in `src/astro_lfd/algorithms/adrtDetect.py`; and
+  the pixel/Hesse conventions in the `devel/` coordinate notes. Validation
+  script: `devel/butterfly_closed_form.py` (scratch, gitignored).
 
 ---
 
@@ -71,13 +72,16 @@ we can compute in closed form for a known shape.
 
 > **Note on the height→intercept mapping.** The derivation uses the plain
 > slope–intercept intercept `b = y − s x`. The ADRT height index `h` is an
-> affine reparameterization of `b` (`design.md`; `_adrt_to_hesse`). We handle
-> this exactly in code by mapping every `(q, h, s_idx)` cell through
-> `_adrt_to_hesse` to `(ρ, θ)` and then to the continuous `s = −cot θ`,
-> `b = ρ / sin θ`. A per-column affine rescaling of the axis does not change
-> which curve (linear/quadratic) the moments follow, only its coefficients — and
-> we work directly in continuous `(s, b)`, so the coefficients are the physical
-> image moments with no conversion factor.
+> *exact affine* reparameterization of `b` (`design.md`): for a fixed
+> quadrant/slope column, `b = α·h + β`, and the continuous slope `s` is the
+> quadrant-selected map of the slope index (the four combinations of
+> `±s/(N−1)`, `±(N−1)/s`). Both `(s, α, β)` are closed form in `(q, s_idx, N)` —
+> see `_slope_intercept_map`. A per-column affine rescale of the axis does not
+> change which curve (linear/quadratic) the moments follow, only its
+> coefficients: the raw integer-index moments `⟨h⟩`, `Var(h)` map to the
+> physical `μ(s) = α⟨h⟩ + β` and `V(s) = α²·Var(h)` with no approximation. This
+> is why the whole slope band is a handful of vectorized array ops — no per-cell
+> coordinate transform and no Python loop.
 
 ### Centroid and variance in terms of image moments
 
@@ -181,8 +185,8 @@ low-order moment fits. Endpoints follow from `(x_c, y_c)`, `φ0`, and `L`.
 
 `devel/butterfly_closed_form.py` simulates clean top-hat segments in a
 4096×4096 frame, measures `μ(s)` and `V(s)` in **continuous** ADRT coordinates
-(each accumulator cell mapped through `_adrt_to_hesse`), fits, inverts, and
-compares to truth.
+(each column's raw-index moments mapped through the closed-form affine
+`b = α·h + β`), fits, inverts, and compares to truth.
 
 **Single case** (`φ0 = 25°, L = 1500, w = 8, center = (2048, 2048)`):
 
@@ -241,9 +245,10 @@ a genuinely useful discovery for a future ADRT-detector paper.
 
 1. **Continuous vs. index coordinates.** The exact quadratic holds in continuous
    `(s, b)`. The raw integer ADRT column index `s_idx` maps to `s` through a
-   *nonuniform* `s(s_idx) = tan θ(s_idx)` (`design.md`). Fitting against `s_idx`
-   directly is only locally quadratic; always convert to continuous `s` via
-   `_adrt_to_hesse` first (as the validation does).
+   *nonuniform* quadrant map (`design.md`); fitting against `s_idx` directly is
+   only locally quadratic. Always convert to the continuous slope and intercept
+   via `_slope_intercept_map` first (as `extract_segment_adrt` and the
+   validation do).
 2. **Width bias.** The additive `w²` offset from digital-line discretization
    should be characterized (dependence on angle, quadrant, PSF blur) and
    subtracted. Sub-pixel widths (`w ≲ 4`) are the least accurate.
@@ -267,8 +272,8 @@ a genuinely useful discovery for a future ADRT-detector paper.
 - Z. Xu, B.-S. Shin, R. Klette, "Closed form line-segment extraction using the
   Hough transform," *Pattern Recognition* 48(12), 2015 — the Hough-space
   precedent (variance/centroid moment analysis).
-- ADRT geometry and the analytic ADRT↔Hesse transform: [`design.md`](design.md)
-  and `src/astro_lfd/algorithms/adrtDetect.py` (`_adrt_to_hesse`,
+- ADRT geometry and the closed-form slope/intercept map: [`design.md`](design.md)
+  and `src/astro_lfd/algorithms/adrtDetect.py` (`_slope_intercept_map`,
   `_hesse_to_adrt`).
 - Image second-moment (inertia tensor) orientation/axis-length formulas — standard
   (e.g. Hu moments; principal-axis analysis).
