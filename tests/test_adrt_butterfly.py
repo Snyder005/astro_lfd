@@ -1,7 +1,7 @@
-"""Tests for the ADRT butterfly line-segment estimator.
+"""Tests for the ADRT butterfly line-segment extractor.
 
 Covers the closed-form inversion (`_invert_inertia`, pure numpy) and the full
-`estimate_segment_adrt` on simulated top-hat segments. The estimator lives in
+`extract_segment_adrt` on simulated top-hat segments. The extractor lives in
 `adrtDetect.py`, which imports the LSST stack at module load, so these tests are
 skipped when the stack (or `adrt`) is unavailable.
 
@@ -22,7 +22,7 @@ adrt = pytest.importorskip("adrt")
 from astro_lfd.algorithms.adrtDetect import (  # noqa: E402
     _hesse_to_adrt,
     _invert_inertia,
-    estimate_segment_adrt,
+    extract_segment_adrt,
 )
 from astro_lfd.sims import Streak  # noqa: E402
 
@@ -79,9 +79,9 @@ def test_invert_inertia_clamps_negative_to_zero():
 
 
 # --------------------------------------------------------------------------- #
-# Integration: simulate a top-hat segment, run the full estimator.
+# Integration: simulate a top-hat segment, run the full extractor.
 # --------------------------------------------------------------------------- #
-def _run_estimator(phi0_deg, length, width, center=(2048.0, 2048.0), half_band=90):
+def _run_extractor(phi0_deg, length, width, center=(2048.0, 2048.0), half_band=90):
     ny = nx = 4096
     # Streak theta is the NORMAL angle; a line at angle phi0 has normal phi0+90.
     streak = Streak.from_center_length(
@@ -91,7 +91,7 @@ def _run_estimator(phi0_deg, length, width, center=(2048.0, 2048.0), half_band=9
     result = adrt.adrt(signal)
     n = result.shape[2]
     q, h, s = _hesse_to_adrt(streak.rho, np.deg2rad(streak.theta), n)
-    return estimate_segment_adrt(
+    return extract_segment_adrt(
         result, int(round(float(q))), float(h), int(round(float(s))), n, half_band=half_band
     )
 
@@ -99,19 +99,25 @@ def _run_estimator(phi0_deg, length, width, center=(2048.0, 2048.0), half_band=9
 @pytest.mark.parametrize("phi0_deg", [10.0, 25.0, 40.0])
 @pytest.mark.parametrize("length", [1000.0, 2000.0])
 @pytest.mark.parametrize("width", [8.0, 16.0])
-def test_estimate_segment_recovers_geometry(phi0_deg, length, width):
+def test_extract_segment_recovers_geometry(phi0_deg, length, width):
     """Length and angle are near-exact; width within the discretization bias."""
-    est = _run_estimator(phi0_deg, length, width)
+    seg = _run_extractor(phi0_deg, length, width)
+    length_hat, width_hat, phi0_hat = seg.segment_dimensions()
 
+    # Moments match the known rectangle inertia tensor (drives everything else).
+    mu20, mu11, mu02 = _moments_from_ABC(*_rectangle_moments(length, width, math.radians(phi0_deg)))
+    assert seg.mu20 == pytest.approx(mu20, rel=0.02)
+    assert seg.mu02 == pytest.approx(mu02, rel=0.05)
+    assert seg.mu11 == pytest.approx(mu11, rel=0.02)
     # Length: < 1% (validated max over the sweep is 0.68%).
-    assert est.length == pytest.approx(length, rel=0.01)
+    assert length_hat == pytest.approx(length, rel=0.01)
     # Slope / angle: < 0.05 deg (validated max 0.006 deg).
-    assert math.degrees(math.atan(est.slope)) == pytest.approx(phi0_deg, abs=0.05)
+    assert math.degrees(phi0_hat) == pytest.approx(phi0_deg, abs=0.05)
     # Width carries a small additive w^2 discretization bias; loose without it.
-    assert est.width == pytest.approx(width, rel=0.15)
+    assert width_hat == pytest.approx(width, rel=0.15)
     # Center recovered essentially exactly.
-    assert est.center_x == pytest.approx(2048.0, abs=1.0)
-    assert est.center_y == pytest.approx(2048.0, abs=1.0)
+    assert seg.center_x == pytest.approx(2048.0, abs=1.0)
+    assert seg.center_y == pytest.approx(2048.0, abs=1.0)
 
 
 def test_width_bias_is_additive_constant_in_wsq():
@@ -123,8 +129,8 @@ def test_width_bias_is_additive_constant_in_wsq():
     phi0_deg, length = 25.0, 2000.0
     residuals = []
     for width in (4.0, 8.0, 16.0, 32.0):
-        est = _run_estimator(phi0_deg, length, width)
-        residuals.append(est.width**2 - width**2)
+        _, width_hat, _ = _run_extractor(phi0_deg, length, width).segment_dimensions()
+        residuals.append(width_hat**2 - width**2)
 
     residuals = np.array(residuals)
     # All positive, order a few px^2, and mutually consistent to ~1.5 px^2.
@@ -133,19 +139,25 @@ def test_width_bias_is_additive_constant_in_wsq():
     assert residuals.std() < 1.5
 
 
-def test_estimate_is_band_insensitive():
+def test_extract_is_band_insensitive():
     """The globally-quadratic law gives a stable length across fit bandwidths."""
-    lengths = [_run_estimator(25.0, 1500.0, 8.0, half_band=b).length for b in (60, 120, 240)]
+    lengths = [
+        _run_extractor(25.0, 1500.0, 8.0, half_band=b).segment_dimensions()[0] for b in (60, 120, 240)
+    ]
     assert max(lengths) - min(lengths) < 0.02 * 1500.0
 
 
-def test_estimate_raises_on_too_few_columns():
+def test_extract_raises_on_too_few_columns():
     """A degenerate band (fewer than three columns) is rejected."""
-    est_inputs = _sim_inputs(25.0, 1500.0, 8.0)
-    result, q, h, s, n = est_inputs
+    result, q, h, s, n = _sim_inputs(25.0, 1500.0, 8.0)
     with pytest.raises(ValueError, match="usable slope column"):
         # half_band=1 -> at most two interior columns around the peak.
-        estimate_segment_adrt(result, q, h, s, n, half_band=1)
+        extract_segment_adrt(result, q, h, s, n, half_band=1)
+
+
+def _moments_from_ABC(A, B, C):
+    """Map variance-quadratic coefficients (A, B, C) to (mu20, mu11, mu02)."""
+    return A, -0.5 * B, C
 
 
 def _sim_inputs(phi0_deg, length, width, center=(2048.0, 2048.0)):
