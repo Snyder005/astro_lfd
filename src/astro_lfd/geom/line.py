@@ -656,49 +656,6 @@ class LineSegment2D(LineGeometry2D):
         return geom.IntervalD.fromSpannedPoints([smin, smax])
 
 
-def plot_line_segment(axes: matplotlib.axes.Axes, line_segment: LineSegment2D, **kwargs) -> None:
-    """Plot a `LineSegment2D`.
-
-    Parameters
-    ----------
-    axes : `matplotlib.axes.Axes`
-        A (sub-)plot in a figure.
-    line_segment : `astro_lfd.geom.LineSegment2D`
-        The line segment to plot.
-    """
-    p0 = line_segment.p0
-    p1 = line_segment.p1
-
-    axes.plot([p0.x, p1.x], [p0.y, p1.y], **kwargs)
-
-
-def plot_line(
-    axes: matplotlib.axes.Axes,
-    line: Line2D,
-    extent: list[int],
-    set_limits: bool = True,
-    **kwargs,
-) -> None:
-    """Plot a `Line2D` clipped to a bounding box.
-
-    Parameters
-    ----------
-    axes : `matplotlib.axes.Axes`
-        A (sub-)plot in a figure.
-    line : `astro_lfd.geom.Line2D`
-        The line to plot.
-    extent : `list` [`int`]
-        The bounding box extent (left, right, bottom, top).
-    """
-    box = geom.Box2I(geom.Point2I(extent[0], extent[2]), geom.Point2I(extent[1], extent[3]))
-    line_segment = line.clipped_to(box)
-    plot_line_segment(axes, line_segment, **kwargs)
-
-    if set_limits:
-        axes.set_ylim(extent[2:])
-        axes.set_xlim(extent[:2])
-
-
 def _apply_transform(transform: Any, point: geom.Point2D) -> geom.Point2D:
     """Apply a transform to a point.
 
