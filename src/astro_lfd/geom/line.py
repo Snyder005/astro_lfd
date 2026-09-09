@@ -656,36 +656,6 @@ class LineSegment2D(LineGeometry2D):
         return geom.IntervalD.fromSpannedPoints([smin, smax])
 
 
-def _embed_rho_theta(
-    rho: ArrayLike,
-    theta: ArrayLike,
-    rho_tol: float,
-    theta_tol: float,
-) -> NDArray[np.float64]:
-    """Embed in euclidean space."""
-    if rho_tol <= 0:
-        raise ValueError(f"rho_tol must be > 0: {rho_tol}")
-
-    if theta_tol <= 0:
-        raise ValueError(f"theta_tol must be > 0: {theta_tol}")
-
-    if theta_tol < 1e-12:
-        raise ValueError(f"theta_tol too small for stable embedding: {theta_tol}")
-
-    rho = np.asarray(rho, dtype=np.float64)
-    theta = np.asarray(theta, dtype=np.float64)
-
-    dist_scale = 1.0 / rho_tol
-    angle_scale = 1.0 / (math.sqrt(2.0) * math.sin(theta_tol / 2.0))
-
-    embedded_points = np.empty((rho.shape[0], 3), dtype=np.float64)
-    embedded_points[:, 0] = angle_scale * np.cos(theta)
-    embedded_points[:, 1] = angle_scale * np.sin(theta)
-    embedded_points[:, 2] = dist_scale * rho
-
-    return embedded_points
-
-
 def _apply_transform(transform: Any, point: geom.Point2D) -> geom.Point2D:
     """Apply a transform to a point.
 
