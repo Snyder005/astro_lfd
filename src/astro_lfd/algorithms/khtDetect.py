@@ -37,7 +37,7 @@ class KHTDetectConfig(pexConfig.Config):
         default=["NO_DATA", "INTRP", "BAD", "SAT", "EDGE", "ITL_DIP", "SPIKE"],
     )
     bin_size = pexConfig.Field(
-        doc="Pixel bin size for input image.",
+        doc="Bin size to use for pixel binning of the input image array.",
         dtype=int,
         default=1,
     )
@@ -49,12 +49,12 @@ class KHTDetectConfig(pexConfig.Config):
         default=50,
     )
     cluster_minimum_deviation = pexConfig.Field(
-        doc="Allowed deviation (in pixels) from a straight line.",
+        doc="Allowed deviation (in pixels) from a straight line for a detected feature.",
         dtype=int,
         default=2,
     )
     delta = pexConfig.Field(
-        doc="Stepsize in angle-radius parameter space.",
+        doc="Step size in angle-radius parameter space.",
         dtype=float,
         default=0.2,
     )
