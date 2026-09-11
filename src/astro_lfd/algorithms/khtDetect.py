@@ -1,20 +1,15 @@
 __all__ = ["KHTDetectConfig", "KHTDetectTask"]
 
-import math
-import numpy as np
-from numpy.typing import NDArray
-from skimage.feature import canny
-from sklearn.cluster import KMeans
-
-import lsst.afw.detection as afwDetect
-import lsst.afw.geom as afwGeom
 import lsst.afw.image as afwImage
-import lsst.afw.math as afwMath
 import lsst.afw.table as afwTable
 import lsst.geom as geom
 import lsst.kht
 import lsst.pex.config as pexConfig
 import lsst.pipe.base as pipeBase
+import numpy as np
+from numpy.typing import NDArray
+from skimage.feature import canny
+from sklearn.cluster import KMeans
 
 from .base import get_line_mask, get_pixel_mask, timed
 from ..geom.line import Line2D
@@ -38,7 +33,7 @@ class KHTDetectConfig(pexConfig.Config):
     bad_mask_dilation = pexConfig.Field(
         doc="Number of pixels to dilate the bad mask by.",
         dtype=int,
-        default=4,
+        default=10,
     )
 
     # Configuration for KHT.
@@ -130,7 +125,7 @@ class KHTDetectTask(pipeBase.Task):
                 Canny binary edge map with invalid regions masked
                 (`numpy.ndarray`).
             ``streak_mask``
-                Streak mask plane (`numpy.ndarray`, (Ny, Nx)).
+                Streak mask plane (`numpy.ndarray`).
             ``timings``
                 Computing times for each processing step (`dict`)
         """
@@ -249,7 +244,7 @@ class KHTDetectTask(pipeBase.Task):
             # Individual streak mask
             line_mask = get_line_mask(line, shape, self.config.streak_width)
             line_masks.append(line_mask)
-        self.log.info(f"Accepted {len(streaks):d} streak(s).")
+        self.log.info(f"Accepted {len(streaks):d} streak(s)")
 
         streak_mask = np.array(line_masks).any(axis=0)
         if self.config.only_mask_detected:
