@@ -1,4 +1,4 @@
-__all__ = ["binary_dilation", "get_pixel_mask", "HasTimings", "timed"]
+__all__ = ["binary_dilation", "get_line_mask", "get_pixel_mask", "HasTimings", "timed"]
 
 from collections.abc import Callable
 from functools import wraps
@@ -10,6 +10,8 @@ import numpy as np
 from numpy.typing import NDArray
 from scipy.ndimage import distance_transform_edt
 
+from ..geom.line import Line2D
+
 
 class HasTimings(Protocol):
     """A protocol defining structural behavior for timings.
@@ -19,6 +21,32 @@ class HasTimings(Protocol):
     """
 
     timings: dict[str, float]
+
+
+def get_line_mask(line: Line2D, shape: tuple[int, int], width: float) -> NDArray[np.bool_]:
+    """Get the binary array corresponding to a region around a line.
+
+    Parameters
+    ----------
+    line : `astro_lfd.geom.Line2D`
+        The line used to define the mask.
+    shape : `tuple` [`int`]
+        The shape of the array.
+    width : `float`
+        The width of the region centered around the line.
+
+    Returns
+    -------
+    line_mask : `numpy.ndarray`, (Ny, Nx)
+        Boolean array, `True` the in region around the line.
+    """
+    rho = line.rho
+    theta = line.theta.asRadians()
+
+    Y, X = np.ogrid[:shape[0], :shape[1]]
+    mask = np.abs((X * np.cos(theta) + Y * np.sin(theta)) - rho) < width / 2.0
+
+    return mask
 
 
 def get_pixel_mask(mask: afwImage.Mask, mask_plane: str | list[str]) -> NDArray[np.bool_]:

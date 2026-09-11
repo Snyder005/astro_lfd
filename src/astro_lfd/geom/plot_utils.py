@@ -55,7 +55,7 @@ def plot_camera(ax: Axes, camera: Camera, add_labels: bool = False, **kwargs) ->
 def plot_line_segment(
     ax: Axes,
     line_segment: LineSegment2D,
-    transform: TransformPoint2ToPoint2 | None,
+    transform: TransformPoint2ToPoint2 | None = None,
     **kwargs,
 ) -> None:
     """Plot a `LineSegment2D`.
@@ -67,7 +67,7 @@ def plot_line_segment(
     line_segment : `astro_lfd.geom.LineSegment2D`
         The line segment to plot.
     transform : `lsst.afw.geom.TransformPoint2ToPoint2`, optional
-        Coordinate transform to apply to points.
+        Coordinate transform to apply to points (None, be default).
     **kwargs
         Additional keyword arguments passed to `matplotlib.axes.Axes.plot`.
     """
