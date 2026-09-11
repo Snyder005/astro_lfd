@@ -1,0 +1,17 @@
+description: diffim streak detection and measurement
+tasks:
+  detectDiaStreak:
+    class: astro_lfd.tasks.StreakDetectTask
+    config:
+      connections.difference: "difference_image"
+      connections.dia_streaks: "dia_strk"
+  writeDiaStreakTable:
+    class: lsst.pipe.tasks.postprocess.WriteSourceTableTask
+    config:
+      connections.catalog: "dia_strk"
+      connections.outputCatalog: "dia_streak_detector"
+  consolidateDiaStreakTable:
+    class: lsst.pipe.tasks.postprocess.ConsolidateSourceTableTask
+    config:
+      connections.inputCatalogs: "dia_streak_detector"
+      connections.outputCatalog: "dia_streak_visit"

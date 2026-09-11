@@ -1,0 +1,26 @@
+description: LSSTCam specialization of the DRP streaks pipeline in DP2
+instrument: lsst.obs.lsst.LsstCam
+imports:
+  - location: $DRP_PIPE_DIR/pipelines/LSSTCam/DRP.yaml
+tasks:
+  detectAndMeasureDiaSource:
+    class: lsst.ip.diffim.DetectAndMeasureTask
+    config:
+      connections.subtractedMeasuredExposure: "difference_image"
+      connections.maskedStreaks: "difference_streaks"
+  writeDiaStreakCatalog:
+    class: astro_lfd.pipe.postprocess.WriteStreakCatalogTask
+    config:
+      connections.streaks: "difference_streaks"
+      connections.difference: "difference_image"
+      connections.output_catalog: "dia_strk"
+  writeDiaStreakTable:
+    class: lsst.pipe.tasks.postprocess.WriteSourceTableTask
+    config:
+      connections.catalog: "dia_strk"
+      connections.outputCatalog: "dia_streak_detector"
+  consolidateDiaStreakTable:
+    class: lsst.pipe.tasks.postprocess.ConsolidateSourceTableTask
+    config:
+      connections.inputCatalogs: "dia_streak_detector"
+      connections.outputCatalog: "dia_streak_visit"
