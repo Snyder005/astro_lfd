@@ -1,4 +1,4 @@
-__all__ = ["StreakAnalysisConfig", "StreakAnalysisTask"]
+__all__ = ["StreakDetectConfig", "StreakDetectTask"]
 
 import lsst.afw.image as afwImage
 import lsst.afw.table as afwTable
@@ -9,12 +9,12 @@ from ..algorithms.khtDetect import KHTDetectTask
 from ..table.streakAdapter import StreakAdapter
 
 
-class StreakAnalysisConnections(
+class StreakDetectConnections(
     pipeBase.PipelineTaskConnections,
     dimensions=("instrument", "visit", "detector"),
     defaultTemplates={"coaddName": "deep", "fakesType": ""},
 ):
-    """Connections for `WriteStreakCatalogTask`."""
+    """Connections for `StreakDetectTask`."""
 
     difference = pipeBase.connectionTypes.Input(
         doc="Input difference image with detection mask plane filled in.",
@@ -30,8 +30,8 @@ class StreakAnalysisConnections(
     )
 
 
-class StreakAnalysisConfig(pipeBase.PipelineTaskConfig, pipelineConnections=StreakAnalysisConnections):
-    """Configurable parameters for `StreakAnalysisTask`."""
+class StreakDetectConfig(pipeBase.PipelineTaskConfig, pipelineConnections=StreakDetectConnections):
+    """Configurable parameters for `StreakDetectTask`."""
 
     detection_algorithm = pexConfig.ChoiceField(
         dtype=str,
@@ -50,11 +50,11 @@ class StreakAnalysisConfig(pipeBase.PipelineTaskConfig, pipelineConnections=Stre
     )
 
 
-class StreakAnalysisTask(pipeBase.PipelineTask):
+class StreakDetectTask(pipeBase.PipelineTask):
     """Detect and measure linear features on a difference image."""
 
-    ConfigClass = StreakAnalysisConfig
-    _DefaultName = "streakAnalysis"
+    ConfigClass = StreakDetectConfig
+    _DefaultName = "streakDetect"
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)

@@ -1,1 +1,1 @@
-from .streakAnalysis import StreakAnalysisConfig, StreakAnalysisTask
+from .streakDetect import StreakDetectConfig, StreakDetectTask
