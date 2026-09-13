@@ -73,6 +73,73 @@ def _hesse_to_adrt(
     return q.astype(np.float64), h, s
 
 
+def _adrt_to_hesse(
+    q: NDArray[np.integer] | int,
+    h: NDArray[np.floating] | float,
+    s: NDArray[np.floating] | float,
+    N: int,
+) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
+    """Convert ADRT coordinates to Hesse normal form parameters.
+
+    Analytic, vectorized inverse of `_hesse_to_adrt`: maps ADRT
+    quadrant/height/slope indices ``(q, h, s)`` to Hesse normal ``(rho, theta)``
+    in the PIXEL frame of the grid the ADRT ran on (binned/padded). It
+    reproduces `adrt.utils.coord_adrt` cell by cell without materializing the
+    ``(4, 2N-1, N)`` coordinate arrays, and accepts fractional ``h`` and ``s``
+    so sub-pixel peak positions convert directly.
+
+    ``theta`` is returned in ``[0, pi)`` with ``rho`` sign-flipped accordingly,
+    matching the `~astro_lfd.geom.Line2D` canonical form and the input
+    convention of `_hesse_to_adrt`.
+
+    Parameters
+    ----------
+    q : `numpy.ndarray` or `int`
+        The ADRT quadrant index (0-3).
+    h, s : `numpy.ndarray` or `float`
+        The ADRT height and slope indices; may be fractional.
+    N : `int`
+        Size of the ADRT domain (must be a power of 2).
+
+    Returns
+    -------
+    rho, theta : `numpy.ndarray`
+        The Hesse normal form rho (pixels) and theta (radians, in ``[0, pi)``),
+        broadcast to the common shape of the inputs.
+    """
+    q = np.asarray(q)
+    h = np.asarray(h, dtype=np.float64)
+    s = np.asarray(s, dtype=np.float64)
+    c = (N - 1) / 2.0
+
+    # Slope geometry: the digital line slope in the quadrant's local frame and
+    # the ADRT height -> Radon offset map (the same algebra as in
+    # `adrt.utils.coord_adrt`, here in closed form).
+    ns = s / (N - 1)
+    ts = np.arctan(ns)
+    cs = np.cos(ts) + np.sin(ts)
+    hi = 1.0 - (2.0 * h + 1.0) / (2.0 * N)
+    h0 = ((hi + ((2.0 * N - 1.0) / (2.0 * N)) * ns) / (1.0 + ns) - 0.5) * cs
+    offset = np.where(q % 2 == 0, h0, -h0)
+
+    # Quadrant-dependent line angle, then to the normal angle and recenter the
+    # offset from the image center to the PIXEL origin.
+    angle = np.select(
+        [q == 0, q == 1, q == 2, q == 3],
+        [ts - np.pi / 2.0, -ts, ts, np.pi / 2.0 - ts],
+    )
+    theta = np.pi / 2.0 - angle
+    rho = -offset * N + c * (np.cos(theta) + np.sin(theta))
+
+    # Canonicalize to theta in [0, pi).
+    theta = np.mod(theta, 2.0 * np.pi)
+    flip = theta >= np.pi
+    theta = np.where(flip, theta - np.pi, theta)
+    rho = np.where(flip, -rho, rho)
+
+    return rho, theta
+
+
 @dataclass
 class ADRTSegment:
     """Closed-form line-segment moments from the ADRT accumulator.
