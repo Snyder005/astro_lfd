@@ -1,37 +1,67 @@
-__all__ = ["ADRTDetectConfig", "ADRTDetectTask", "ADRTSegment", "extract_segment_adrt"]
+__all__ = ["ADRTDetectConfig", "ADRTDetectTask", "AdrtPeak"]
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 
 import adrt
 import lsst.afw.image as afwImage
-import lsst.afw.math as afwMath
 import lsst.afw.table as afwTable
 import lsst.geom as geom
 import lsst.pex.config as pexConfig
 import lsst.pipe.base as pipeBase
 import numpy as np
-from numpy.polynomial import Polynomial
 from numpy.typing import NDArray
+from scipy import ndimage
 
-from .base import binary_dilation, get_pixel_mask, timed
-from ..geom.line import Line2D, LineSegment2D
+from .adrtButterfly import _adrt_to_hesse, _hesse_to_adrt, extract_segment_adrt
+from .base import binary_dilation, get_line_mask, get_pixel_mask, timed
+from ..geom.line import Line2D
 from ..table.streakAdapter import StreakAdapter
+
+
+@dataclass(frozen=True)
+class AdrtPeak:
+    """A detected peak in the ADRT accumulator.
+
+    Attributes
+    ----------
+    q, h, s : `int`
+        Accumulator indices (quadrant, height, slope) of the local maximum.
+    h_refined, s_refined : `float`
+        Sub-cell height and slope after refinement (equal to ``h``, ``s`` when
+        no refinement was requested).
+    value : `float`
+        Significance of the peak: the accumulator value divided by the square
+        root of the digital line length, in units of the noise standard
+        deviation when the input is unit-variance white noise.
+    line : `~astro_lfd.geom.Line2D`
+        The line in the PIXEL frame of the grid the ADRT ran on.
+    """
+
+    q: int
+    h: int
+    s: int
+    h_refined: float
+    s_refined: float
+    value: float
+    line: Line2D
 
 
 class ADRTDetectConfig(pexConfig.Config):
     """Configurable parameters for `ADRTDetectTask`."""
 
-    # Configuration for preprocessing
+    # Configuration for preprocess
     bad_mask_planes = pexConfig.ListField(
         doc="Names of mask plane regions to ignore when doing streak detection.",
         dtype=str,
         default=["NO_DATA", "INTRP", "BAD", "SAT", "EDGE", "ITL_DIP", "SPIKE"],
     )
-    bin_size = pexConfig.Field(
-        doc="Pixel bin size for input image.",
+    mask_edge_pixels = pexConfig.Field(
+        doc="Number of pixels to mask around image edges.",
         dtype=int,
-        default=1,
+        default=15,
     )
+
+    # Configuration for postprocess
 
 
 class ADRTDetectTask(pipeBase.Task):
@@ -41,6 +71,13 @@ class ADRTDetectTask(pipeBase.Task):
     _DefaultName = "adrtDetect"
 
     timings: dict[str, float]
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.timings = {}
+        # Digital line length per accumulator cell, keyed by the ADRT domain
+        # size. One extra forward transform per N, reused across exposures.
+        self._line_length_cache: dict[int, NDArray[np.float32]] = {}
 
     def run(self, table: afwTable.SourceTable, exposure: afwImage.ExposureF) -> pipeBase.Struct:
         """Detect streaks in an exposure.
@@ -64,16 +101,23 @@ class ADRTDetectTask(pipeBase.Task):
                 Catalog of detected streaks (`lsst.afw.table.SourceCatalog`).
             ``imarr``
                 Image array with invalid regions masked (`numpy.ndarray`).
+            ``streak_mask``
+                Streak mask plane (`numpy.ndarray`).
             ``timings``
                 Computing times for each processing step (`dict`)
         """
         streaks = afwTable.SourceCatalog(table)
         self.timings = {}
         imarr = self.preprocess(exposure)
-        segments = self.detect(imarr)
-        self.postprocess(streaks, exposure, segments=segments)
+        lines = self.detect(imarr)
+        streak_mask = self.postprocess(streaks, exposure, lines)
 
-        return pipeBase.Struct(streaks=streaks, imarr=imarr, timings=self.timings)
+        return pipeBase.Struct(
+            streaks=streaks,
+            imarr=imarr,
+            streak_mask=streak_mask,
+            timings=self.timings,
+        )
 
     @timed("preprocess")
     def preprocess(self, exposure: afwImage.ExposureF) -> NDArray[np.float64]:
@@ -89,14 +133,17 @@ class ADRTDetectTask(pipeBase.Task):
         imarr : `numpy.ndarray`
             The image array with invalid regions masked.
         """
-        mi = afwMath.binImage(exposure.maskedImage, self.config.bin_size)
-        imarr = mi.image.array
+        imarr = exposure.image.array.copy()
 
         bad_mask = get_pixel_mask(mi.mask, self.config.bad_mask_planes)
-        if self.config.bin_size == 1:
-            bad_mask = binary_dilation(bad_mask, 1)
-        imarr[bad_mask] = 0.0
+        if edge := self.config.mask_edge_pixels:
+            bad_mask[:edge, :] = True
+            bad_mask[-edge:, :] = True
+            bad_mask[:, :edge] = True
+            bad_mask[:, -edge:] = True
+        bad_mask = binary_dilation(bad_mask, 1)
 
+        imarr[bad_mask] = 0.0
         padded_imarr = np.pad(
             imarr,
             ((0, 4096 // self.config.bin_size - imarr.shape[0]), (0, 0)),
@@ -106,83 +153,35 @@ class ADRTDetectTask(pipeBase.Task):
         return padded_imarr
 
     @timed("detect")
-    def detect(self, imarr: NDArray[np.float64]) -> list["ADRTSegment"]:
+    def detect(self, imarr: NDArray[np.float64]) -> list[Line2D]:
         """Perform linear feature detection on masked image array.
 
-        Currently the peak detector is not fully implemented; it returns the
-        global maximum for research and development. Each peak is passed to the
-        closed-form butterfly analysis (`extract_segment_adrt`) to recover the
-        line-segment moments (orientation, center, 2-D second moments) directly
-        from the ADRT accumulator. Parameters are in the PIXEL frame.
+        Runs the forward ADRT and the multi-peak detector `_find_peaks` on the
+        accumulator. Lines are returned in the PIXEL frame of the grid the
+        ADRT ran on, ranked by descending significance.
 
         Parameters
         ----------
         imarr : `numpy.ndarray`
-            The masked image array.
+            The masked image array (square, power-of-two size).
 
         Returns
         -------
-        segments : `list` [`ADRTSegment`]
-            The recovered segments, in the PIXEL frame.
+        lines : `list` [`~astro_lfd.geom.Line2D`]
+            The detected lines, in the PIXEL frame.
         """
         adrt_result = adrt.adrt(imarr)
-        N = adrt_result.shape[2]
-
-        # Peak detector (to be developed fully). Returns integer accumulator
-        # indices in the binned/padded grid the ADRT actually ran on.
-        peaks = self._find_peaks(adrt_result)
-
-        segments: list[ADRTSegment] = []
-        for q, h, s in peaks:
-            try:
-                segment = extract_segment_adrt(adrt_result, int(q), float(h), int(s), N)
-            except ValueError as error:
-                self.log.warning("Skipping peak (q=%d, h=%d, s=%d): %s", q, h, s, error)
-                continue
-            segments.append(self._apply_bin_size(segment))
-
-        return segments
-
-    def _apply_bin_size(self, segment: "ADRTSegment") -> "ADRTSegment":
-        """Rescale a binned-grid segment to full-resolution PIXEL coordinates.
-
-        Binning is an isotropic rescale of the pixel grid: linear quantities
-        (rho, center) scale by ``bin_size``, the 2-D second moments (which are in
-        pixel^2) scale by ``bin_size**2``, and the angle ``theta`` is unchanged.
-        This is done outside the ADRT coordinate transform, alongside the other
-        array-frame -> PIXEL-frame corrections (e.g. a future ``XY0``).
-
-        Parameters
-        ----------
-        segment : `ADRTSegment`
-            The segment in the binned/padded grid.
-
-        Returns
-        -------
-        scaled : `ADRTSegment`
-            The segment rescaled to full-resolution pixels.
-        """
-        b = self.config.bin_size
-        if b == 1:
-            return segment
-
-        return replace(
-            segment,
-            rho=segment.rho * b,
-            center_x=segment.center_x * b,
-            center_y=segment.center_y * b,
-            mu20=segment.mu20 * b**2,
-            mu11=segment.mu11 * b**2,
-            mu02=segment.mu02 * b**2,
-        )
+        lines = self._find_peaks(adrt_result)
+        assert isinstance(lines, list)
+        self.log.info(f"The Approximate Discrete Radon Transform detected {len(lines):d} line(s)")
+        return lines
 
     @timed("postprocess")
     def postprocess(
         self,
         streaks: afwTable.SourceTable,
         exposure: afwImage.ExposureF,
-        *,
-        segments: list["ADRTSegment"],
+        lines: list[Line2D],
     ) -> None:
         """Perform postprocessing of detected linear features.
 
@@ -207,443 +206,313 @@ class ADRTDetectTask(pipeBase.Task):
 
         box = geom.Box2D(exposure.getBBox())
         wcs = exposure.getWcs()
-        for segment in segments:
-            line = Line2D(segment.rho, segment.theta * geom.radians)
-
-            # Derive the top-hat length/width from the moment tensor for the
-            # finite-segment representation, then build the segment from the
-            # recovered center and length and clip it to the frame. The
-            # along-line center coordinate is the center point projected onto the
-            # line direction.
-            length, width, _ = segment.segment_dimensions()
-            center = geom.Point2D(segment.center_x, segment.center_y)
-            s_center = line.along_coordinate(center)
-            line_segment = LineSegment2D.from_center_length(line, s_center, length)
-
-            clipped = line_segment.clipped_to(box)
-            if clipped is None:
+        line_masks = [np.zeros(shape, dtype=bool)]
+        for line in lines:
+            line_segment = line.clipped_to(box)
+            if line_segment is None:
                 continue
 
             streak = StreakAdapter(streaks.addNew())
-            streak.setLineSegment(clipped)
-            streak["line_width"] = width
+            streak.setLineSegment(line_segment)
 
-            streak_center = clipped.center
-            streak["line_center_x"] = streak_center.getX()
-            streak["line_center_y"] = streak_center.getY()
+            center = line_segment.center
+            streak["line_center_x"] = center.getX()
+            streak["line_center_y"] = center.getY()
             if wcs is not None:
                 streak.setCoord(wcs.pixelToSky(streak_center))
 
-        self.log.info("Accepted %d streak(s) from ADRT butterfly analysis", len(streaks))
+            # Set footprint
+            line_mask = get_line_mask(line, shape, self.config.streak_width)
+            # Set STREAK mask
+            line_masks.append(line_mask)
+
+        self.log.info(f"Accepted {len(streaks):d} streak(s)")
+
+        streak_mask = np.array(line_masks).any(axis=0)
+        if self.config.only_mask_detected:
+            streak_mask &= detected_mask
+
+        return streak_mask
+
+    def _line_length(self, N: int) -> NDArray[np.float32]:
+        """Digital line length of every accumulator cell for domain size ``N``.
+
+        The ADRT of an all-ones image counts the pixels on each digital line,
+        which is exactly the number of terms summed into the corresponding
+        accumulator cell. Cached per ``N``.
+        """
+        if N not in self._line_length_cache:
+            self._line_length_cache[N] = adrt.adrt(np.ones((N, N), dtype=np.float32))
+        return self._line_length_cache[N]
 
     def _find_peaks(
         self,
-        adrt_result: NDArray[np.float64],
-    ) -> list[tuple[int, int, int]]:
-        """Placeholder for peak finding in the ADRT transform space.
+        adrt_result: NDArray[np.floating],
+        *,
+        line_length: NDArray[np.floating] | None = None,
+        k: float = 6.0,
+        k_contrast: float = 5.0,
+        footprint: tuple[int, int] = (7, 31),
+        contrast_annulus: tuple[int, int] = (12, 40),
+        wing_margin: float = 1.0,
+        wing_noise: float = 4.0,
+        cone_pad: int = 4,
+        min_length: float = 64.0,
+        max_peaks: int = 50,
+        dedup_rho: float = 3.0,
+        dedup_theta: float = 0.5,
+        refine: str = "parabolic",
+        return_peaks: bool = False,
+    ) -> list[Line2D] | tuple[list[Line2D], list[AdrtPeak]]:
+        """Detect multiple line peaks in the ADRT accumulator.
 
-        Will eventually detect multiple peaks. For now it returns the single
-        global maximum as integer accumulator indices, which the butterfly
-        analysis (`extract_segment_adrt`) consumes directly. Focus on
-        implementation first, then decide optimizations (within Python or as
-        an extension to a branch of `adrt` if C++ implementation needed).
+        Operates on the significance array ``S = A / sqrt(L)``, where ``A`` is
+        the accumulator and ``L`` the digital line length of each cell, so a
+        single threshold in noise-sigma units applies to every slope and
+        offset. Detection runs per quadrant in four vectorized stages:
 
-        Parameters
-        ----------
-        adrt_result : `numpy.ndarray`
-            The ADRT result.
+        1. Local maxima of ``S`` within an anisotropic ``footprint`` that exceed
+           the quadrant's ``median + k * MAD`` and have ``L >= min_length``.
+        2. A height-axis local-contrast test that rejects the broad "butterfly
+           wing" ridges a bright streak casts across neighbouring slope
+           columns: the peak must exceed the median of its own column at
+           ``contrast_annulus`` cells away by ``k_contrast * MAD``.
+        3. Greedy non-maximum suppression in descending ``S``: once a peak is
+           accepted, weaker candidates inside its wing cone
+           ``|dh| <= |ds| + cone_pad`` (evaluated in the accepted peak's
+           quadrant frame, so the cone reaches across quadrant seams) and
+           below the wing envelope are discarded. The envelope is the
+           expected wing amplitude of a streak whose ridge has angular
+           half-width ``dW``: ``sin(dW) / sin(d) * sqrt(L_peak / L)`` at
+           angular distance ``d``, scaled by ``wing_margin``.
+        4. Optional sub-cell refinement, closed-form conversion to Hesse
+           ``(rho, theta)`` via `_adrt_to_hesse`, and de-duplication in Hesse
+           space of lines that appear on both sides of a quadrant seam.
 
-        Returns
-        -------
-        peaks : `list` [`tuple` [`int`, `int`, `int`]]
-            The detected peaks as ``(q, h, s)`` accumulator indices (quadrant,
-            height, slope).
-        """
-        # Get global maximum indices (placeholder for multipeak finding).
-        q, h, s = np.unravel_index(np.argmax(adrt_result), adrt_result.shape)
-
-        return [(int(q), int(h), int(s))]
-
-
-def _hesse_to_adrt(
-    rho: NDArray[np.floating] | float,
-    theta: NDArray[np.floating] | float,
-    N: int,
-) -> tuple[NDArray[np.float64], NDArray[np.float64], NDArray[np.float64]]:
-    """Convert Hesse normal form parameters to ADRT coordinates.
-
-    Analytic, vectorized map from Hesse normal ``(rho, theta)`` (in the ADRT's
-    binned/padded pixel grid) to ADRT quadrant/height/slope indices
-    ``(q, h, s)``. Returns floating-point indices so sub-pixel positions are
-    preserved. This is the counterpart to the accumulator-side slope/intercept
-    map in `_slope_intercept_map`; it places a known line's peak column, which
-    the simulation-based validation tests use to seed `extract_segment_adrt`.
-
-    ``theta`` is reduced modulo ``pi`` (Hesse lines are undirected). The
-    round-trip is exact in the interior; it is degenerate only on the
-    quadrant-boundary angles (0, 45, 90, 135 deg, i.e. ``s == 0`` and
-    ``s == N - 1``), where adjacent ADRT quadrants share the same slope and the
-    quadrant assignment is a convention choice.
-
-    Parameters
-    ----------
-    rho, theta : `numpy.ndarray` or `float`
-        The Hesse normal form rho (pixels) and theta (radians) parameters.
-    N : `int`
-        Size of the ADRT domain (must be a power of 2).
-
-    Returns
-    -------
-    q, h, s : `numpy.ndarray`
-        The ADRT quadrant, height, and slope indices, broadcast to the common
-        shape of ``rho`` and ``theta``. ``q`` is integer-valued; ``h`` and
-        ``s`` may be fractional.
-    """
-    rho = np.asarray(rho, dtype=np.float64)
-    theta = np.asarray(theta, dtype=np.float64)
-    c = (N - 1) / 2.0
-
-    # Reduce to [0, pi) and pick the quadrant + base line angle. The four ADRT
-    # quadrants tile [0, pi) in normal-vector angle as: [0, pi/4)->3,
-    # [pi/4, pi/2)->2, [pi/2, 3pi/4)->1, [3pi/4, pi)->0.
-    th = np.mod(theta, np.pi)
-    conds = [th < np.pi / 4.0, th < np.pi / 2.0, th < 3.0 * np.pi / 4.0]
-    q = np.select(conds, [3, 2, 1], default=0)
-    ts = np.select(
-        conds,
-        [th, np.pi / 2.0 - th, th - np.pi / 2.0],
-        default=np.pi - th,
-    )
-
-    # Invert the slope geometry.
-    ns = np.tan(ts)
-    s = ns * (N - 1)
-    cs = np.cos(ts) + np.sin(ts)
-
-    # Invert the rho recenter/scale to recover the Radon offset, undo the
-    # quadrant sign flip, then invert the height mapping. Trig uses `th` so it
-    # is consistent with the quadrant reduction above.
-    offset = (c * (np.cos(th) + np.sin(th)) - rho) / N
-    h0 = np.where(q % 2 == 0, offset, -offset)
-    hi = (h0 / cs + 0.5) * (1.0 + ns) - ((2.0 * N - 1.0) / (2.0 * N)) * ns
-    h = N * (1.0 - hi) - 0.5
-
-    return q.astype(np.float64), h, s
-
-
-@dataclass
-class ADRTSegment:
-    """Closed-form line-segment moments from the ADRT accumulator.
-
-    Result of `extract_segment_adrt`. The primary data products are the image
-    moments: the center (first moments) and the 2-D central second moments
-    ``(mu20, mu11, mu02)``, which are identical to the ``(XX, XY, YY)`` moments
-    used to characterize sources in LSST catalogs. All quantities are in the
-    pixel grid the ADRT ran on (binned/padded); the caller undoes binning (see
-    `ADRTDetectTask.detect`). See ``docs/detectors/adrt/butterfly.md`` for the
-    derivation.
-
-    For a top-hat (uniform rectangle) model — useful for simulations and
-    validation — call `segment_dimensions` to invert the moment tensor to
-    ``(length, width, phi0)``.
-
-    Attributes
-    ----------
-    rho, theta : `float`
-        Refined Hesse normal form parameters (pixels, radians). ``theta`` is the
-        line-normal angle; the orientation follows from the fitted moment tensor
-        rather than the integer peak column.
-    center_x, center_y : `float`
-        Segment center in the ADRT pixel grid (pixels), from the centroid fit.
-    mu20, mu11, mu02 : `float`
-        The 2-D central second moments of the feature (pixels^2), equal to the
-        catalog ``(XX, XY, YY)``. Related to the fitted variance quadratic
-        ``V(s) = A s^2 + B s + C`` by ``(A, B, C) = (mu20, -2 mu11, mu02)``.
-    var_residual : `float`
-        RMS residual of the variance quadratic fit (pixels^2), a fit-quality
-        diagnostic.
-    n_columns : `int`
-        Number of slope columns used in the fit.
-    """
-
-    rho: float
-    theta: float
-    center_x: float
-    center_y: float
-    mu20: float
-    mu11: float
-    mu02: float
-    var_residual: float
-    n_columns: int
-
-    def segment_dimensions(self, width_bias: float = 0.0) -> tuple[float, float, float]:
-        """Invert the moment tensor to top-hat ``(length, width, phi0)``.
-
-        Treats the feature as a uniform rectangle and inverts its 2-D inertia
-        tensor ``(mu20, mu11, mu02)`` to the longitudinal length, transverse
-        width, and line angle. This is the top-hat-specific interpretation of the
-        moments (see `_invert_inertia`); for arbitrary streak morphologies the
-        moments themselves are the primary description.
+        All coordinates are in the PIXEL frame of the grid the ADRT ran on
+        (binned/padded); the caller undoes any binning.
 
         Parameters
         ----------
-        width_bias : `float`, optional
-            Additive discretization bias in ``w^2`` (pixels^2) to subtract before
-            taking the root (0.0, by default). See the width-bias discussion in
-            ``docs/detectors/adrt/butterfly.md``.
+        adrt_result : `numpy.ndarray`, (4, 2N-1, N)
+            The ADRT accumulator.
+        line_length : `numpy.ndarray`, (4, 2N-1, N), optional
+            Digital line length (number of valid pixels) per cell. Defaults
+            to the ADRT of an all-ones image; pass the ADRT of the valid-pixel
+            mask to account for masked regions.
+        k : `float`, optional
+            Detection threshold above the per-quadrant median, in robust
+            (MAD-based) sigma units.
+        k_contrast : `float`, optional
+            Minimum local contrast over the column background, in the same
+            sigma units.
+        footprint : `tuple` [`int`, `int`], optional
+            Size of the local-maximum neighbourhood along ``(height, slope)``.
+        contrast_annulus : `tuple` [`int`, `int`], optional
+            Half-open range of height offsets ``[inner, outer)`` on each side of
+            a candidate over which the column background is measured.
+        wing_margin : `float`, optional
+            Multiplier on the wing envelope. A streak of width ``w`` and
+            length ``l`` has ridge angular half-width ``dW ~ w / l`` and casts
+            a wing of relative accumulator amplitude ``sin(dW) / sin(d)`` at
+            angular distance ``d`` (each line at that angle crosses the streak
+            over ``w / sin(d)`` pixels); the ``sqrt(L)`` normalization adds the
+            line-length factor. Measured wings reach 0.5-0.9 of this model, so
+            1.0 suppresses them with a small safety margin. Fainter lines
+            crossing inside the cone below the envelope are indistinguishable
+            from wings by amplitude and are suppressed too.
+        wing_noise : `float`, optional
+            Noise allowance added to the wing envelope, in the quadrant's
+            MAD-based sigma units. Wing residuals near the detection threshold
+            are local maxima of wing plus noise, so they overshoot the
+            noise-free envelope by a few sigma; the maximum over the many
+            cells of a wing crest reaches about 4 sigma.
+        cone_pad : `int`, optional
+            Extra height cells added to the wing cone half-width.
+        min_length : `float`, optional
+            Minimum digital line length for a cell to be a candidate.
+        max_peaks : `int`, optional
+            Maximum number of peaks accepted by the suppression stage.
+        dedup_rho, dedup_theta : `float`, optional
+            Two accepted lines closer than this in rho (pixels) and theta
+            (degrees) are the same line; the more significant one is kept.
+        refine : `str`, optional
+            Sub-cell refinement: ``"none"``, ``"parabolic"`` (three-point
+            parabola along each axis) or ``"butterfly"``
+            (`extract_segment_adrt`, falling back to parabolic where its slope
+            band is under-determined). The butterfly moments span the full
+            height axis of every slope column, so at unit per-pixel noise the
+            noise second moment dominates and the result is unreliable; use it
+            only on high-SNR or background-suppressed accumulators.
+        return_peaks : `bool`, optional
+            Also return the accumulator-space peak descriptors.
 
         Returns
         -------
-        length, width : `float`
-            The recovered top-hat length and width (pixels).
-        phi0 : `float`
-            The line angle ``phi0`` (radians), ``dy/dx = tan(phi0)``.
+        lines : `list` [`~astro_lfd.geom.Line2D`]
+            The detected lines, ranked by descending significance.
+        peaks : `list` [`AdrtPeak`]
+            The matching peak descriptors; only if ``return_peaks`` is set.
         """
-        return _invert_inertia(self.mu20, -2.0 * self.mu11, self.mu02, width_bias=width_bias)
+        if refine not in ("none", "parabolic", "butterfly"):
+            raise ValueError(f"unknown refinement: {refine!r}")
+        if adrt_result.ndim != 3 or adrt_result.shape[0] != 4:
+            raise ValueError(f"expected an ADRT array of shape (4, 2N-1, N), got {adrt_result.shape}")
+        N = adrt_result.shape[2]
+        if adrt_result.shape[1] != 2 * N - 1:
+            raise ValueError(f"expected an ADRT array of shape (4, 2N-1, N), got {adrt_result.shape}")
 
+        L = self._line_length(N) if line_length is None else np.asarray(line_length)
+        S = (adrt_result / np.sqrt(np.maximum(L, 1.0))).astype(np.float32)
 
-def _slope_intercept_map(
-    q: int,
-    s_cols: NDArray[np.integer],
-    N: int,
-) -> tuple[NDArray[np.float64], NDArray[np.float64], NDArray[np.float64]]:
-    """Closed-form slope value and affine height->intercept map per column.
+        # Stage 1: per-quadrant local maxima above a robust threshold. The
+        # filter never crosses the quadrant axis; the noise level is estimated
+        # on a 1/64 subsample of the populated cells.
+        is_max = S == ndimage.maximum_filter(S, size=(1, *footprint), mode="nearest")
+        sub = S[:, ::8, ::8]
+        sub_ok = L[:, ::8, ::8] > 0
+        cand: list[NDArray[np.intp]] = []
+        mads = np.empty(4)
+        for q in range(4):
+            sample = sub[q][sub_ok[q]]
+            median = np.median(sample)
+            mads[q] = 1.4826 * np.median(np.abs(sample - median))
+            keep = is_max[q] & (S[q] > median + k * mads[q]) & (L[q] >= min_length)
+            hs = np.argwhere(keep)
+            cand.append(np.column_stack([np.full(len(hs), q), hs]))
+        qhs = np.vstack(cand)
+        n_local = len(qhs)
 
-    For a fixed ADRT quadrant/slope column the continuous line slope
-    ``s = dy/dx`` is constant, and the intercept ``b = y - s x`` is an *exact
-    affine* function of the integer height index ``h``: ``b = alpha * h + beta``.
-    Both follow in closed form from the ADRT digital-line geometry (verified to
-    floating-point precision against the former per-cell coordinate transform),
-    so the whole slope band is handled with three short vectorized arrays and no
-    per-row transform or per-column Python loop.
+        # Stage 2: height-axis local contrast. Wings are nearly as high
+        # tens of cells away along h; a real line peak is not.
+        if n_local:
+            off = np.arange(*contrast_annulus)
+            off = np.concatenate([-off, off])
+            hh = np.clip(qhs[:, 1, None] + off[None, :], 0, 2 * N - 2)
+            background = np.median(S[qhs[:, 0, None], hh, qhs[:, 2, None]], axis=1)
+            values = S[qhs[:, 0], qhs[:, 1], qhs[:, 2]]
+            keep = (values - background) > k_contrast * mads[qhs[:, 0]]
+            qhs = qhs[keep]
+            values = values[keep]
+            order = np.argsort(-values, kind="stable")
+            qhs = qhs[order]
+            values = values[order]
+        else:
+            values = np.empty(0, dtype=np.float32)
+        n_contrast = len(qhs)
 
-    - The slope is the quadrant-selected map of the slope index (the four
-      combinations of ``+/- s/(N-1)`` and ``+/- (N-1)/s``).
-    - ``(alpha, beta)`` come from the same geometry; only the intercept axis is
-      rescaled per column, which does not change that the centroid is linear and
-      the variance quadratic in the slope (see
-      ``docs/detectors/adrt/butterfly.md``).
+        # Stage 3: greedy cone suppression. Every candidate is re-expressed in
+        # the accepted peak's quadrant frame so wings that cross a seam are
+        # still inside its cone.
+        rho_all, theta_all = _adrt_to_hesse(qhs[:, 0], qhs[:, 1], qhs[:, 2], N)
+        length_all = L[qhs[:, 0], qhs[:, 1], qhs[:, 2]]
+        alive = np.ones(len(qhs), dtype=bool)
+        accepted: list[int] = []
+        while alive.any() and len(accepted) < max_peaks:
+            i = int(np.flatnonzero(alive)[0])
+            accepted.append(i)
+            alive[i] = False
+            q, h, s = (int(v) for v in qhs[i])
+            width = _ridge_half_width(S[q], h, s, float(values[i]), cone_pad, footprint[1], N // 4)
+            _, theta_edge = _adrt_to_hesse(q, h, s + width, N)
+            sin_dw = abs(np.sin(float(theta_edge) - theta_all[i]))
+            _, h_frame, s_frame = _hesse_to_adrt(rho_all, theta_all, N, quadrant=q)
+            dh = np.abs(h_frame - h)
+            ds = np.abs(s_frame - s)
+            sin_d = np.abs(np.sin(theta_all - theta_all[i]))
+            with np.errstate(divide="ignore"):
+                envelope = sin_dw / sin_d * np.sqrt(length_all[i] / np.maximum(length_all, 1.0))
+            envelope = np.minimum(1.0, wing_margin * envelope) * values[i] + wing_noise * mads[qhs[:, 0]]
+            in_wing = (dh <= ds + cone_pad) & (values <= envelope)
+            alive &= ~in_wing
 
-    Parameters
-    ----------
-    q : `int`
-        The quadrant index of the columns (0-3).
-    s_cols : `numpy.ndarray` of `int`
-        The integer slope (column) indices, strictly interior to ``[1, N-1)``.
-    N : `int`
-        The ADRT domain size (power of two).
+        # Stage 4: refinement, conversion, and seam de-duplication.
+        peaks: list[AdrtPeak] = []
+        for i in accepted:
+            q, h, s = (int(v) for v in qhs[i])
+            h_ref, s_ref = float(h), float(s)
+            rho_theta: tuple[float, float] | None = None
+            if refine == "butterfly":
+                try:
+                    segment = extract_segment_adrt(adrt_result, q, h, s, N)
+                    rho_theta = (segment.rho, segment.theta)
+                except ValueError as exc:
+                    self.log.debug(f"butterfly refinement failed at {(q, h, s)}: {exc}")
+            if rho_theta is None:
+                if refine != "none":
+                    h_ref = h + _parabolic_offset(S[q, :, s], h)
+                    s_ref = s + _parabolic_offset(S[q, h, :], s)
+                rho_arr, theta_arr = _adrt_to_hesse(q, h_ref, s_ref, N)
+                rho_theta = (float(rho_arr), float(theta_arr))
+            rho, theta = rho_theta
+            line = Line2D(rho, theta * geom.radians)
+            if any(_same_line(line, p.line, dedup_rho, np.deg2rad(dedup_theta)) for p in peaks):
+                continue
+            peaks.append(AdrtPeak(q, h, s, h_ref, s_ref, float(values[i]), line))
 
-    Returns
-    -------
-    slopes : `numpy.ndarray`
-        The continuous line slope ``dy/dx`` for each column.
-    alpha, beta : `numpy.ndarray`
-        The affine intercept-map coefficients, ``b = alpha * h + beta``.
-    """
-    s = s_cols.astype(np.float64)
-    c = (N - 1) / 2.0
-    k = (2.0 * N - 1.0) / (2.0 * N)
-
-    ns = s / (N - 1)
-    ts = np.arctan(ns)
-    cs = np.cos(ts) + np.sin(ts)
-
-    # Normal-vector angle theta = pi/2 - line-angle; the quadrant sign s_q flips
-    # the offset for the odd quadrants. See _hesse_to_adrt for the inverse map.
-    angle = {
-        0: ts - np.pi / 2.0,
-        1: -ts,
-        2: ts,
-        3: np.pi / 2.0 - ts,
-    }[q]
-    theta = np.pi / 2.0 - angle
-    sin_t = np.sin(theta)
-    s_q = 1.0 if q % 2 == 0 else -1.0
-
-    slopes = -np.cos(theta) / sin_t
-
-    # Affine intercept map: b = (P * h + Q) / sin(theta), with P, Q from the
-    # ADRT height->offset->rho chain (constant across rows of a column).
-    P = s_q * cs / (1.0 + ns)
-    Q = c * (np.cos(theta) + np.sin(theta)) - s_q * N * cs * (k - 0.5)
-    alpha = P / sin_t
-    beta = Q / sin_t
-
-    return slopes, alpha, beta
-
-
-def _invert_inertia(A: float, B: float, C: float, width_bias: float = 0.0) -> tuple[float, float, float]:
-    """Invert variance-quadratic coefficients to ``(length, width, phi0)``.
-
-    The coefficients ``V(s) = A s^2 + B s + C`` are the image central second
-    moments ``(mu20, -2 mu11, mu02)`` (the 2-D inertia tensor). Its eigenvalues
-    are the principal moments ``L^2/12`` (major) and ``w^2/12`` (minor) of a
-    uniform rectangle, and its major-axis orientation is the line angle. See
-    ``docs/detectors/adrt/butterfly.md`` sec. 3.
-
-    Parameters
-    ----------
-    A, B, C : `float`
-        The variance-quadratic coefficients.
-    width_bias : `float`, optional
-        Additive discretization bias in ``w^2`` (pixels^2) to subtract before
-        taking the root (0.0, by default). See the width-bias discussion in the
-        derivation doc.
-
-    Returns
-    -------
-    length, width : `float`
-        The recovered top-hat length and width (pixels). Non-negative;
-        clamped at zero if the (bias-corrected) principal moment is negative.
-    phi0 : `float`
-        The line angle ``phi0`` (radians), ``dy/dx = tan(phi0)``.
-    """
-    half_sum = A + C
-    root = float(np.hypot(A - C, B))  # sqrt((A - C)^2 + B^2)
-    length_sq = 6.0 * (half_sum + root)
-    width_sq = 6.0 * (half_sum - root) - width_bias
-    phi0 = 0.5 * float(np.arctan2(-B, A - C))
-    return np.sqrt(max(length_sq, 0.0)), np.sqrt(max(width_sq, 0.0)), phi0
-
-
-def extract_segment_adrt(
-    adrt_result: NDArray[np.float64],
-    q: int,
-    h: float,
-    s_idx: int,
-    N: int,
-    *,
-    half_band: int = 90,
-    background: str = "median",
-) -> ADRTSegment:
-    """Extract line-segment moments directly from the ADRT accumulator.
-
-    The ADRT "butterfly" analysis. For a fixed slope column the accumulator is
-    the image projected onto the intercept axis ``b = y - s x``, so the
-    accumulator-weighted column centroid and variance are exactly the image
-    moments: ``mu(s) = y_c - s x_c`` (linear) and
-    ``V(s) = mu20 s^2 - 2 mu11 s + mu02`` (quadratic in the continuous slope).
-    Fitting both recovers the center and the 2-D central second moments
-    ``(mu20, mu11, mu02)`` (catalog ``XX, XY, YY``) in closed form. Derivation
-    and validation: ``docs/detectors/adrt/butterfly.md``.
-
-    The slope value and the height->intercept map are both closed-form functions
-    of the quadrant and slope index (`_slope_intercept_map`), so the whole slope
-    band is processed with vectorized array operations — no per-cell coordinate
-    transform and no Python loop over columns.
-
-    Parameters
-    ----------
-    adrt_result : `numpy.ndarray`, (4, 2N-1, N)
-        The ADRT result.
-    q : `int`
-        The quadrant index of the detected peak.
-    h : `float`
-        The height index of the detected peak. Accepted so the natural peak
-        descriptor ``(q, h, s_idx)`` can be passed straight through; the current
-        moment analysis spans the full height axis of each column and does not
-        use it. Reserved for future height-windowing around the ridge.
-    s_idx : `int`
-        The integer slope (column) index of the detected peak.
-    N : `int`
-        The ADRT domain size (power of two).
-    half_band : `int`, optional
-        Number of slope columns to include on each side of the peak (90, by
-        default). The variance law is globally quadratic, so the result is
-        insensitive to this within one quadrant.
-    background : `str`, optional
-        Per-column background model subtracted before the moment sums.
-        ``"median"`` (default) subtracts the per-column median (clipped at zero);
-        ``"none"`` subtracts nothing.
-
-    Returns
-    -------
-    segment : `ADRTSegment`
-        The recovered moments and fit diagnostics, in the ADRT pixel grid
-        (binning undone by the caller).
-
-    Raises
-    ------
-    ValueError
-        Raised if the background model is unknown, or if fewer than three usable
-        slope columns fall within the band and the peak's quadrant, so the
-        quadratic fit is under-determined.
-    """
-    if background not in ("median", "none"):
-        raise ValueError(f"unknown background model: {background!r}")
-
-    # Slope band clipped to the peak's quadrant (columns 0 and N-1 are the
-    # quadrant-boundary slopes; stay strictly interior to avoid the seam).
-    lo = max(1, s_idx - half_band)
-    hi = min(N - 1, s_idx + half_band)
-    s_cols = np.arange(lo, hi)
-
-    slopes, alpha, beta = _slope_intercept_map(q, s_cols, N)
-
-    # Per-column accumulator weights over the full height axis, background
-    # subtracted per column. Columns are the trailing axis so moment sums reduce
-    # over axis 0 (the height/intercept axis).
-    weights = adrt_result[q, :, lo:hi].astype(np.float64)  # (2N-1, n_cols)
-    if background == "median":
-        weights = weights - np.median(weights, axis=0, keepdims=True)
-        np.clip(weights, 0.0, None, out=weights)
-
-    total = weights.sum(axis=0)
-    good = total > 0
-    if int(good.sum()) < 3:
-        raise ValueError(
-            f"only {int(good.sum())} usable slope column(s) in band; need >= 3 for the quadratic fit"
+        self.log.debug(
+            f"ADRT peaks: {n_local} local maxima, {n_contrast} after contrast test, "
+            f"{len(accepted)} after suppression, {len(peaks)} after de-duplication"
         )
+        lines = [p.line for p in peaks]
+        return (lines, peaks) if return_peaks else lines
 
-    slopes, alpha, beta = slopes[good], alpha[good], beta[good]
-    weights, total = weights[:, good], total[good]
 
-    # Weighted moments of the integer height index per column, then mapped to the
-    # continuous intercept b = alpha h + beta: centroid(b) = alpha <h> + beta and
-    # Var(b) = alpha^2 Var(h). The affine map is exact, so these are the physical
-    # image moments with no approximation.
-    h_idx = np.arange(weights.shape[0], dtype=np.float64)[:, None]
-    mean_h = (weights * h_idx).sum(axis=0) / total
-    var_h = (weights * (h_idx - mean_h) ** 2).sum(axis=0) / total
-    centroid = alpha * mean_h + beta
-    variance = alpha**2 * var_h
+def _ridge_half_width(
+    S_q: NDArray[np.floating],
+    h: int,
+    s: int,
+    value: float,
+    pad: int,
+    minimum: int,
+    maximum: int,
+) -> int:
+    """Half-prominence half-width of a peak's ridge along the slope axis.
 
-    # Weighted fits: variance quadratic V(s) = A s^2 + B s + C and centroid line
-    # mu(s) = beta0 + beta1 s. Weight by column flux so the peak dominates and
-    # far, contaminated columns matter less.
-    sqrt_w = np.sqrt(total)
-    C_coef, B_coef, A_coef = (float(c) for c in Polynomial.fit(slopes, variance, deg=2, w=sqrt_w).convert().coef)
-    beta0, beta1 = (float(c) for c in Polynomial.fit(slopes, centroid, deg=1, w=sqrt_w).convert().coef)
+    Walks outwards from column ``s`` taking, at each slope distance ``d``, the
+    maximum of the quadrant over the cone rows ``h +- (d + pad)``, and stops
+    where that crest drops below half the peak value. The result is clipped
+    to ``[minimum, maximum]``; the crest of a point-like source never drops,
+    so ``maximum`` bounds the walk.
+    """
+    n_h, n_s = S_q.shape
+    half = 0.5 * value
+    for d in range(1, maximum):
+        rows = slice(max(0, h - d - pad), min(n_h, h + d + pad + 1))
+        crest = -np.inf
+        for column in (s - d, s + d):
+            if 0 <= column < n_s:
+                crest = max(crest, float(S_q[rows, column].max()))
+        if crest < half:
+            return max(minimum, d)
+    return maximum
 
-    # The quadratic coefficients are the central second-moment (inertia) tensor:
-    # (A, B, C) = (mu20, -2 mu11, mu02).
-    mu20 = A_coef
-    mu11 = -0.5 * B_coef
-    mu02 = C_coef
 
-    # Position: mu(s) = y_c - s x_c, so beta1 = -x_c and beta0 = y_c.
-    center_x = -beta1
-    center_y = beta0
+def _parabolic_offset(profile: NDArray[np.floating], i: int) -> float:
+    """Sub-cell offset of the maximum of ``profile`` near index ``i``.
 
-    # Refine (rho, theta) from the fitted moment tensor rather than the integer
-    # peak. The major-axis (line) angle is phi0 = 1/2 atan2(2 mu11, mu20 - mu02);
-    # the normal angle is phi0 + pi/2 and rho is the center projected on it.
-    phi0 = 0.5 * np.arctan2(2.0 * mu11, mu20 - mu02)
-    theta = phi0 + np.pi / 2.0
-    rho = center_x * np.cos(theta) + center_y * np.sin(theta)
+    Fits a parabola through ``profile[i-1:i+2]``; returns 0 at the array
+    edges or where the three points are not concave. Clipped to ``[-0.5, 0.5]``.
+    """
+    if i <= 0 or i >= len(profile) - 1:
+        return 0.0
+    y0, y1, y2 = (float(v) for v in profile[i - 1 : i + 2])
+    denominator = y0 - 2.0 * y1 + y2
+    if denominator >= 0.0:
+        return 0.0
+    return float(np.clip(0.5 * (y0 - y2) / denominator, -0.5, 0.5))
 
-    # Fit-quality diagnostic: RMS residual of the variance quadratic.
-    model = A_coef * slopes**2 + B_coef * slopes + C_coef
-    var_residual = float(np.sqrt(np.mean((variance - model) ** 2)))
 
-    return ADRTSegment(
-        rho=float(rho),
-        theta=float(theta),
-        center_x=float(center_x),
-        center_y=float(center_y),
-        mu20=float(mu20),
-        mu11=float(mu11),
-        mu02=float(mu02),
-        var_residual=var_residual,
-        n_columns=int(slopes.size),
-    )
+def _same_line(a: Line2D, b: Line2D, rho_tol: float, theta_tol: float) -> bool:
+    """Whether two canonical Hesse lines coincide within tolerance.
+
+    Handles the wrap at ``theta = pi``, where ``(rho, theta)`` and
+    ``(-rho, theta - pi)`` describe the same line.
+    """
+    dtheta = abs(a.theta.asRadians() - b.theta.asRadians())
+    if dtheta > np.pi / 2.0:
+        dtheta = np.pi - dtheta
+        drho = abs(a.rho + b.rho)
+    else:
+        drho = abs(a.rho - b.rho)
+    return dtheta < theta_tol and drho < rho_tol

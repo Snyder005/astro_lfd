@@ -1,9 +1,9 @@
 """Tests for the ADRT butterfly line-segment extractor.
 
 Covers the closed-form inversion (`_invert_inertia`, pure numpy) and the full
-`extract_segment_adrt` on simulated top-hat segments. The extractor lives in
-`adrtDetect.py`, which imports the LSST stack at module load, so these tests are
-skipped when the stack (or `adrt`) is unavailable.
+`extract_segment_adrt` on simulated top-hat segments, plus the closed-form
+ADRT <-> Hesse coordinate maps. The simulation helpers import the LSST stack,
+so these tests are skipped when the stack (or `adrt`) is unavailable.
 
 Derivation and validated tolerances: ``docs/detectors/adrt/butterfly.md``.
 """
@@ -13,13 +13,11 @@ import math
 import numpy as np
 import pytest
 
-adrtDetect = pytest.importorskip(
-    "astro_lfd.algorithms.adrtDetect",
-    reason="requires the LSST stack and the adrt backend",
-)
+pytest.importorskip("lsst.geom", reason="requires the LSST stack")
 adrt = pytest.importorskip("adrt")
 
-from astro_lfd.algorithms.adrtDetect import (  # noqa: E402
+from astro_lfd.algorithms.adrtButterfly import (  # noqa: E402
+    _adrt_to_hesse,
     _hesse_to_adrt,
     _invert_inertia,
     extract_segment_adrt,
@@ -141,9 +139,7 @@ def test_width_bias_is_additive_constant_in_wsq():
 
 def test_extract_is_band_insensitive():
     """The globally-quadratic law gives a stable length across fit bandwidths."""
-    lengths = [
-        _run_extractor(25.0, 1500.0, 8.0, half_band=b).segment_dimensions()[0] for b in (60, 120, 240)
-    ]
+    lengths = [_run_extractor(25.0, 1500.0, 8.0, half_band=b).segment_dimensions()[0] for b in (60, 120, 240)]
     assert max(lengths) - min(lengths) < 0.02 * 1500.0
 
 
@@ -170,3 +166,69 @@ def _sim_inputs(phi0_deg, length, width, center=(2048.0, 2048.0)):
     n = result.shape[2]
     q, h, s = _hesse_to_adrt(streak.rho, np.deg2rad(streak.theta), n)
     return result, int(round(float(q))), float(h), int(round(float(s))), n
+
+
+# --------------------------------------------------------------------------- #
+# Closed-form coordinate maps: ADRT (q, h, s) <-> Hesse (rho, theta).
+# --------------------------------------------------------------------------- #
+def _coord_adrt_hesse(N):
+    """Reference (rho, theta) for every cell from `adrt.utils.coord_adrt`.
+
+    `coord_adrt` gives the Radon offset (image-centered, in units of N) and
+    the line angle; convert those to the PIXEL-frame Hesse normal form and
+    canonicalize theta to [0, pi) the same way `Line2D` does.
+    """
+    offset, angle = adrt.utils.coord_adrt(N)
+    theta = np.pi / 2.0 - np.broadcast_to(angle, offset.shape)
+    c = (N - 1) / 2.0
+    rho = -offset * N + c * (np.cos(theta) + np.sin(theta))
+    theta = np.mod(theta, 2.0 * np.pi)
+    flip = theta >= np.pi
+    theta = np.where(flip, theta - np.pi, theta)
+    rho = np.where(flip, -rho, rho)
+    return rho, theta
+
+
+@pytest.mark.parametrize("N", [16, 64, 256])
+def test_adrt_to_hesse_matches_coord_adrt(N):
+    """`_adrt_to_hesse` reproduces `coord_adrt` cell by cell."""
+    rho_ref, theta_ref = _coord_adrt_hesse(N)
+    q, h, s = np.meshgrid(np.arange(4), np.arange(2 * N - 1), np.arange(N), indexing="ij")
+
+    rho, theta = _adrt_to_hesse(q, h, s, N)
+
+    np.testing.assert_allclose(theta, theta_ref, atol=1e-12)
+    np.testing.assert_allclose(rho, rho_ref, atol=1e-9)
+
+
+@pytest.mark.parametrize("N", [64, 256])
+def test_hesse_adrt_roundtrip_interior(N):
+    """`_hesse_to_adrt` inverts `_adrt_to_hesse` on interior integer cells."""
+    q, h, s = np.meshgrid(np.arange(4), np.arange(2 * N - 1), np.arange(1, N - 1), indexing="ij")
+
+    rho, theta = _adrt_to_hesse(q, h, s, N)
+    q_hat, h_hat, s_hat = _hesse_to_adrt(rho, theta, N)
+
+    np.testing.assert_array_equal(q_hat, q)
+    np.testing.assert_allclose(h_hat, h, atol=1e-8)
+    np.testing.assert_allclose(s_hat, s, atol=1e-8)
+
+
+def test_adrt_to_hesse_fractional_is_between_neighbors():
+    """Fractional indices map continuously between the bracketing cells."""
+    N = 128
+    q, h, s = 1, 100.0, 50.0
+    rho0, th0 = _adrt_to_hesse(q, h, s, N)
+    rho1, th1 = _adrt_to_hesse(q, h + 1.0, s + 1.0, N)
+    rho_mid, th_mid = _adrt_to_hesse(q, h + 0.5, s + 0.5, N)
+
+    assert min(rho0, rho1) < rho_mid < max(rho0, rho1)
+    assert min(th0, th1) < th_mid < max(th0, th1)
+    assert 0.0 <= th_mid < np.pi
+
+
+def test_adrt_to_hesse_scalar_inputs_return_zero_d_arrays():
+    rho, theta = _adrt_to_hesse(2, 10, 5, 32)
+
+    assert np.ndim(rho) == 0 and np.ndim(theta) == 0
+    assert 0.0 <= float(theta) < np.pi
