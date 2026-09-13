@@ -20,3 +20,4 @@ new detector lands.
 ## Per-detector — ADRT
 
 - [adrt-api](adrt-api.md) — signatures, input contract, and output shapes of the `adrt` package.
+- [adrt-peaks](adrt-peaks.md) — `ADRTDetectTask._find_peaks` contract: `S = A/sqrt(L)` significance, ranked `Line2D` output in the ADRT PIXEL frame, `AdrtPeak` descriptors, closed-form index<->Hesse maps, wing-suppression limits.
