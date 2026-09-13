@@ -248,7 +248,7 @@ class ADRTDetectTask(pipeBase.Task):
         footprint: tuple[int, int] = (7, 31),
         contrast_annulus: tuple[int, int] = (12, 40),
         wing_margin: float = 1.0,
-        wing_noise: float = 3.0,
+        wing_noise: float = 4.0,
         cone_pad: int = 4,
         min_length: float = 64.0,
         max_peaks: int = 50,
@@ -318,7 +318,8 @@ class ADRTDetectTask(pipeBase.Task):
             Noise allowance added to the wing envelope, in the quadrant's
             MAD-based sigma units. Wing residuals near the detection threshold
             are local maxima of wing plus noise, so they overshoot the
-            noise-free envelope by a few sigma.
+            noise-free envelope by a few sigma; the maximum over the many
+            cells of a wing crest reaches about 4 sigma.
         cone_pad : `int`, optional
             Extra height cells added to the wing cone half-width.
         min_length : `float`, optional
