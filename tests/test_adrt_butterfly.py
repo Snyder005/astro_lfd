@@ -139,9 +139,7 @@ def test_width_bias_is_additive_constant_in_wsq():
 
 def test_extract_is_band_insensitive():
     """The globally-quadratic law gives a stable length across fit bandwidths."""
-    lengths = [
-        _run_extractor(25.0, 1500.0, 8.0, half_band=b).segment_dimensions()[0] for b in (60, 120, 240)
-    ]
+    lengths = [_run_extractor(25.0, 1500.0, 8.0, half_band=b).segment_dimensions()[0] for b in (60, 120, 240)]
     assert max(lengths) - min(lengths) < 0.02 * 1500.0
 
 
