@@ -11,6 +11,7 @@ def _hesse_to_adrt(
     rho: NDArray[np.floating] | float,
     theta: NDArray[np.floating] | float,
     N: int,
+    quadrant: int | None = None,
 ) -> tuple[NDArray[np.float64], NDArray[np.float64], NDArray[np.float64]]:
     """Convert Hesse normal form parameters to ADRT coordinates.
 
@@ -33,6 +34,11 @@ def _hesse_to_adrt(
         The Hesse normal form rho (pixels) and theta (radians) parameters.
     N : `int`
         Size of the ADRT domain (must be a power of 2).
+    quadrant : `int`, optional
+        Force every line into the coordinate frame of this quadrant instead of
+        the one its angle falls in. Lines outside the quadrant's 45-degree band
+        then get extrapolated indices (``s`` outside ``[0, N-1]``), which is
+        how a peak's neighbourhood is measured across a quadrant seam.
 
     Returns
     -------
@@ -49,10 +55,19 @@ def _hesse_to_adrt(
     # quadrants tile [0, pi) in normal-vector angle as: [0, pi/4)->3,
     # [pi/4, pi/2)->2, [pi/2, 3pi/4)->1, [3pi/4, pi)->0.
     th = np.mod(theta, np.pi)
-    conds = [th < np.pi / 4.0, th < np.pi / 2.0, th < 3.0 * np.pi / 4.0]
-    q = np.select(conds, [3, 2, 1], default=0)
+    if quadrant is None:
+        conds = [th < np.pi / 4.0, th < np.pi / 2.0, th < 3.0 * np.pi / 4.0]
+        q = np.select(conds, [3, 2, 1], default=0)
+    else:
+        # Bring theta to within half a turn of the quadrant's band center;
+        # shifting by pi flips the sign of rho for the same line.
+        center = (7 - 2 * quadrant) * np.pi / 8.0
+        turns = np.round((center - th) / np.pi)
+        th = th + turns * np.pi
+        rho = rho * np.where(turns % 2 == 0, 1.0, -1.0)
+        q = np.broadcast_to(np.asarray(quadrant), th.shape)
     ts = np.select(
-        conds,
+        [q == 3, q == 2, q == 1],
         [th, np.pi / 2.0 - th, th - np.pi / 2.0],
         default=np.pi - th,
     )
@@ -75,8 +90,8 @@ def _hesse_to_adrt(
 
 def _adrt_to_hesse(
     q: NDArray[np.integer] | int,
-    h: NDArray[np.floating] | float,
-    s: NDArray[np.floating] | float,
+    h: NDArray[np.number] | float,
+    s: NDArray[np.number] | float,
     N: int,
 ) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
     """Convert ADRT coordinates to Hesse normal form parameters.
@@ -316,7 +331,7 @@ def _invert_inertia(A: float, B: float, C: float, width_bias: float = 0.0) -> tu
 
 
 def extract_segment_adrt(
-    adrt_result: NDArray[np.float64],
+    adrt_result: NDArray[np.floating],
     q: int,
     h: float,
     s_idx: int,
@@ -421,7 +436,9 @@ def extract_segment_adrt(
     # mu(s) = beta0 + beta1 s. Weight by column flux so the peak dominates and
     # far, contaminated columns matter less.
     sqrt_w = np.sqrt(total)
-    C_coef, B_coef, A_coef = (float(c) for c in Polynomial.fit(slopes, variance, deg=2, w=sqrt_w).convert().coef)
+    C_coef, B_coef, A_coef = (
+        float(c) for c in Polynomial.fit(slopes, variance, deg=2, w=sqrt_w).convert().coef
+    )
     beta0, beta1 = (float(c) for c in Polynomial.fit(slopes, centroid, deg=1, w=sqrt_w).convert().coef)
 
     # The quadratic coefficients are the central second-moment (inertia) tensor:
