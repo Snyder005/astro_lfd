@@ -16,7 +16,7 @@ import lsst.kht
 import lsst.pex.config as pexConfig
 import lsst.pipe.base as pipeBase
 
-from .base import binary_dilation, get_line_mask, get_pixel_mask, timed
+from .base import get_line_mask, get_pixel_mask, timed
 from ..geom.line import Line2D
 from ..table.streakAdapter import StreakAdapter
 
@@ -35,10 +35,10 @@ class KHTDetectConfig(pexConfig.Config):
         dtype=str,
         default=["NO_DATA", "INTRP", "BAD", "SAT", "EDGE", "ITL_DIP", "SPIKE"],
     )
-    mask_edge_pixels = pexConfig.Field(
-        doc="Number of pixels from to mask around image array edges.",
+    bad_mask_dilation = pexConfig.Field(
+        doc="Number of pixels to dilate the bad mask by.",
         dtype=int,
-        default=15,
+        default=4,
     )
 
     # Configuration for KHT.
@@ -136,13 +136,15 @@ class KHTDetectTask(pipeBase.Task):
         """
         streaks = afwTable.SourceCatalog(table)
         self.timings = {}
-        edges, detected_mask = self.preprocess(exposure)
+
+        edges, bad_mask = self.preprocess(exposure)
         lines = self.detect(edges)
-        streak_mask = self.postprocess(streaks, exposure, lines, detected_mask=detected_mask)
+        streak_mask = self.postprocess(streaks, exposure, lines)
 
         return pipeBase.Struct(
             streaks=streaks,
             edges=edges,
+            bad_mask=bad_mask,
             streak_mask=streak_mask,
             timings=self.timings,
         )
@@ -161,23 +163,17 @@ class KHTDetectTask(pipeBase.Task):
         -------
         edges : `numpy.ndarray`, (Ny, Nx)
             The Canny binary edge map with invalid regions masked.
-        detected_mask : `numpy.ndarray`, (Ny, Nx)
-            The detected mask plane.
         """
         detected_mask = get_pixel_mask(exposure.mask, self.config.detected_mask_plane)
         edges = canny(detected_mask.astype(np.float64), use_quantiles=True, sigma=0.1)
-
-        bad_mask = get_pixel_mask(exposure.mask, self.config.bad_mask_planes)
-        # TODO: DM-56055, replace this with improved edge masking
-        if edge := self.config.mask_edge_pixels:
-            bad_mask[:edge, :] = True
-            bad_mask[-edge:, :] = True
-            bad_mask[:, :edge] = True
-            bad_mask[:, -edge:] = True
-        bad_mask = binary_dilation(bad_mask, 1)
-
+        bad_mask = get_pixel_mask(
+            exposure.mask,
+            self.config.bad_mask_planes,
+            dilation=self.config.bad_mask_dilation,
+        )
         edges[bad_mask] = False
-        return edges, detected_mask
+
+        return edges, bad_mask
 
     @timed("detect")
     def detect(self, edges: NDArray[np.bool_]) -> list[Line2D]:
@@ -212,8 +208,6 @@ class KHTDetectTask(pipeBase.Task):
         streaks: afwTable.SourceTable,
         exposure: afwImage.ExposureF,
         lines: list[Line2D],
-        *,
-        detected_mask: NDArray[np.bool_],
     ) -> NDArray[np.bool_]:
         """Perform postprocessing of detected linear features.
 
@@ -224,20 +218,19 @@ class KHTDetectTask(pipeBase.Task):
         exposure : `lsst.afw.image.ExposureF`
             The exposure that was searched.
         lines : `list` [`Line2D`]
-            The detected lines, in centered pixel frame.
-        detected_mask : `numpy.ndarray`, (Ny, Nx)
-            The detected mask plane.
+            The detected lines, in the centered pixel frame.
 
         Returns
         -------
         streak_mask : `numpy.ndarray`, (Ny, Nx)
-            The streak mask plane.
+            The streak mask plane array.
         """
         box = exposure.getBBox()
         wcs = exposure.getWcs()
         shift = geom.Extent2D(box.getCenter())
         shape = exposure.image.array.shape
         line_masks = [np.zeros(shape, dtype=bool)]
+
         for kht_line in lines:
             line = kht_line.translated(shift)
             line_segment = line.clipped_to(box)
@@ -253,16 +246,14 @@ class KHTDetectTask(pipeBase.Task):
             if wcs is not None:
                 streak.setCoord(wcs.pixelToSky(center))
 
-            # Set footprint
+            # Individual streak mask
             line_mask = get_line_mask(line, shape, self.config.streak_width)
-            # Set STREAK mask
             line_masks.append(line_mask)
-
-        self.log.info(f"Accepted {len(streaks):d} streak(s) after profile fitting")
+        self.log.info(f"Accepted {len(streaks):d} streak(s).")
 
         streak_mask = np.array(line_masks).any(axis=0)
         if self.config.only_mask_detected:
-            streak_mask &= detected_mask
+            streak_mask &= get_pixel_mask(exposure.mask, self.config.detected_mask_plane)
 
         return streak_mask
         

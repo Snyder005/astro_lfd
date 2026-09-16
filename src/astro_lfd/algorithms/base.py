@@ -1,10 +1,11 @@
-__all__ = ["binary_dilation", "get_line_mask", "get_pixel_mask", "HasTimings", "timed"]
+__all__ = ["get_line_mask", "get_pixel_mask", "HasTimings", "timed"]
 
 from collections.abc import Callable
 from functools import wraps
 from time import perf_counter
 from typing import Concatenate, Protocol
 
+import lsst.afw.geom as afwGeom
 import lsst.afw.image as afwImage
 import numpy as np
 from numpy.typing import NDArray
@@ -49,7 +50,10 @@ def get_line_mask(line: Line2D, shape: tuple[int, int], width: float) -> NDArray
     return mask
 
 
-def get_pixel_mask(mask: afwImage.Mask, mask_plane: str | list[str]) -> NDArray[np.bool_]:
+def get_pixel_mask(mask: afwImage.Mask,
+    mask_plane: str | list[str],
+    dilation: int = 0,
+) -> NDArray[np.bool_]:
     """Get the binary array corresponding to the named mask planes.
 
     Parameters
@@ -64,25 +68,16 @@ def get_pixel_mask(mask: afwImage.Mask, mask_plane: str | list[str]) -> NDArray[
     pixel_mask : `numpy.ndarray`, (Ny, Nx)
         Boolean array, `True` where any of the named planes is set.
     """
-    return (mask.array & mask.getPlaneBitMask(mask_plane)) != 0
+    ignore_mask = mask.clone()
+    bitmask = mask.getPlaneBitMask(mask_plane)
 
+    if dilation > 0:
+        bbox = ignore_mask.getBBox()
+        for sset in afwGeom.SpanSet.fromMask(mask, bitmask).split():
+            dilated_sset = sset.dilated(dilation)
+            dilated_sset.clippedTo(bbox).setMask(ignore_mask, ignore_mask.getPlaneBitMask("BAD"))
 
-def binary_dilation(binary_image: NDArray[np.bool_], npix_to_dilate: int) -> NDArray[np.bool_]:
-    """Dilate a binary array with a circular structuring element.
-
-    Parameters
-    ----------
-    binary_image : `numpy.ndarray`, (Ny, Nx)
-        The input binary image array.
-    npix_to_dilate : `int`
-        Pixel radius of the circular structuring element to dilate by.
-
-    Returns
-    -------
-    dilated_image : `numpy.ndarray`, (Ny, Nx)
-        The dilated binary image array.
-    """
-    return distance_transform_edt(~binary_image) <= npix_to_dilate
+    return (ignore_mask.array & bitmask) > 0
 
 
 def timed[**P, R, S: HasTimings](
