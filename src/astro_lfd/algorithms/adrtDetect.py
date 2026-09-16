@@ -13,7 +13,7 @@ import numpy as np
 from numpy.polynomial import Polynomial
 from numpy.typing import NDArray
 
-from .base import binary_dilation, get_pixel_mask, timed
+from .base import get_pixel_mask, timed
 from ..geom.line import Line2D, LineSegment2D
 from ..table.streakAdapter import StreakAdapter
 
@@ -92,9 +92,7 @@ class ADRTDetectTask(pipeBase.Task):
         mi = afwMath.binImage(exposure.maskedImage, self.config.bin_size)
         imarr = mi.image.array
 
-        bad_mask = get_pixel_mask(mi.mask, self.config.bad_mask_planes)
-        if self.config.bin_size == 1:
-            bad_mask = binary_dilation(bad_mask, 1)
+        bad_mask = get_pixel_mask(mi.mask, self.config.bad_mask_planes, dilation=1)
         imarr[bad_mask] = 0.0
 
         padded_imarr = np.pad(
