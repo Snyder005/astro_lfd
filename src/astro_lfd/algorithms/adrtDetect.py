@@ -55,13 +55,28 @@ class ADRTDetectConfig(pexConfig.Config):
         dtype=str,
         default=["NO_DATA", "INTRP", "BAD", "SAT", "EDGE", "ITL_DIP", "SPIKE"],
     )
-    mask_edge_pixels = pexConfig.Field(
-        doc="Number of pixels to mask around image edges.",
+    bad_mask_dilation = pexConfig.Field(
+        doc="Number of pixels to dilate the bad mask by.",
         dtype=int,
-        default=15,
+        default=1,
     )
 
     # Configuration for postprocess
+    detected_mask_plane = pexConfig.Field(
+        doc="Name of mask plane with pixels above detection threshold.",
+        dtype=str,
+        default="DETECTED",
+    )
+    only_mask_detected = pexConfig.Field(
+        doc="If true, only propagate the part of the streak mask that overlaps with the detection mask.",
+        dtype=bool,
+        default=True,
+    )
+    streak_width = pexConfig.Field(
+        doc="Initial width (in pixels) of the streak mask.",
+        dtype=float,
+        default=200.0,
+    )
 
 
 class ADRTDetectTask(pipeBase.Task):
@@ -108,19 +123,21 @@ class ADRTDetectTask(pipeBase.Task):
         """
         streaks = afwTable.SourceCatalog(table)
         self.timings = {}
-        imarr = self.preprocess(exposure)
+
+        imarr, bad_mask  = self.preprocess(exposure)
         lines = self.detect(imarr)
         streak_mask = self.postprocess(streaks, exposure, lines)
 
         return pipeBase.Struct(
             streaks=streaks,
             imarr=imarr,
+            bad_mask=bad_mask,
             streak_mask=streak_mask,
             timings=self.timings,
         )
 
     @timed("preprocess")
-    def preprocess(self, exposure: afwImage.ExposureF) -> NDArray[np.float64]:
+    def preprocess(self, exposure: afwImage.ExposureF) -> tuple[NDArray[np.float64], NDArray[np.bool_]]:
         """Perform preprocessing on input exposure.
 
         Parameters
@@ -132,18 +149,20 @@ class ADRTDetectTask(pipeBase.Task):
         -------
         imarr : `numpy.ndarray`
             The image array with invalid regions masked.
+        bad_mask : `numpy.ndarray`
+            The bad pixel mask array
         """
         imarr = exposure.image.array.copy()
-        bad_mask = get_pixel_mask(mi.mask, self.config.bad_mask_planes, dilation=1)
+        bad_mask = get_pixel_mask(
+            exposure.mask,
+            self.config.bad_mask_planes,
+            dilation=self.config.bad_mask_dilation,
+        )
         imarr[bad_mask] = 0.0
 
-        padded_imarr = np.pad(
-            imarr,
-            ((0, 4096 // self.config.bin_size - imarr.shape[0]), (0, 0)),
-            mode="constant",
-            constant_values=0.0,
-        )
-        return padded_imarr
+        padded_imarr = np.zeros((4096, 4096))
+        padded_imarr[:imarr.shape[0], :imarr.shape[1]] = imarr
+        return padded_imarr, bad_mask
 
     @timed("detect")
     def detect(self, imarr: NDArray[np.float64]) -> list[Line2D]:
@@ -165,9 +184,9 @@ class ADRTDetectTask(pipeBase.Task):
         """
         adrt_result = adrt.adrt(imarr)
         lines = self._find_peaks(adrt_result)
-        assert isinstance(lines, list)
         self.log.info(f"The Approximate Discrete Radon Transform detected {len(lines):d} line(s)")
-        return lines
+
+        return [] if len(lines) == 0 else lines
 
     @timed("postprocess")
     def postprocess(
@@ -175,15 +194,8 @@ class ADRTDetectTask(pipeBase.Task):
         streaks: afwTable.SourceTable,
         exposure: afwImage.ExposureF,
         lines: list[Line2D],
-    ) -> None:
+    ) -> NDArray[np.bool_]:
         """Perform postprocessing of detected linear features.
-
-        Builds the finite line-segment representation of each detected streak
-        from the extracted moments (center, orientation, and the top-hat
-        length/width from `ADRTSegment.segment_dimensions`) and stores it in the
-        streak catalog, together with the recovered width. The segment is clipped
-        to the exposure bounding box. For ADRT the Hesse normal origin is the
-        PIXEL origin, so no translation is needed.
 
         Parameters
         ----------
@@ -191,15 +203,19 @@ class ADRTDetectTask(pipeBase.Task):
             The output streak catalog.
         exposure : `lsst.afw.image.ExposureF`
             The exposure that was searched.
-        segments : `list` [`ADRTSegment`]
-            The recovered segments, in the PIXEL frame.
-        """
-        if not segments:
-            return
+        lines : `list` [`Line2D`]
+            The detected lines, in the PIXEL frame.
 
+        Returns
+        -------
+        streak_mask : `numpy.ndarray`
+            The streak mask plane array.
+        """
         box = geom.Box2D(exposure.getBBox())
         wcs = exposure.getWcs()
+        shape = exposure.image.array.shape
         line_masks = [np.zeros(shape, dtype=bool)]
+
         for line in lines:
             line_segment = line.clipped_to(box)
             if line_segment is None:
@@ -212,18 +228,16 @@ class ADRTDetectTask(pipeBase.Task):
             streak["line_center_x"] = center.getX()
             streak["line_center_y"] = center.getY()
             if wcs is not None:
-                streak.setCoord(wcs.pixelToSky(streak_center))
+                streak.setCoord(wcs.pixelToSky(center))
 
-            # Set footprint
+            # Individual streak mask
             line_mask = get_line_mask(line, shape, self.config.streak_width)
-            # Set STREAK mask
             line_masks.append(line_mask)
-
         self.log.info(f"Accepted {len(streaks):d} streak(s)")
 
         streak_mask = np.array(line_masks).any(axis=0)
         if self.config.only_mask_detected:
-            streak_mask &= detected_mask
+            streak_mask &= get_pixel_mask(exposure.mask, self.config.detected_mask_plane)
 
         return streak_mask
 
