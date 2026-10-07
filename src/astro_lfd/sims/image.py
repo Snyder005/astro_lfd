@@ -7,12 +7,11 @@ import numpy as np
 from numpy.typing import NDArray
 
 from .streak import Streak
+from .star import Star
 
-NY: float = 4004
-NX: float = 4096
-FWHM: float = 0.7
+NY: int = 4004
+NX: int = 4096
 READ_NOISE: float = 7.0
-PIXEL_SCALE: float = 0.2
 SKY_COUNTS: dict[str, float] = {
     "u": 81.0,
     "g": 411.0,
@@ -24,8 +23,8 @@ SKY_COUNTS: dict[str, float] = {
 
 
 @dataclass
-class SimulatedImage:
-    """A simulated image with its variance and mask planes.
+class SimulatedExposure:
+    """A simulated exposure with its variance and mask planes.
 
     Parameters
     ----------
@@ -84,25 +83,120 @@ class SimulatedImage:
         return cls(d["image"], d["variance"], d["mask"], ast.literal_eval(str(d["meta"])))
 
     @classmethod
-    def simulate(
+    def simulate_bias(
         cls,
-        streak: Streak,
-        band: str = "r",
-        shape: tuple[int, int] = (NY, NX),
-        read_noise: float = READ_NOISE,
-        fwhm: float = FWHM,
-        pixel_scale: float = PIXEL_SCALE,
-        calib: float = 1.0,
-        unit: str = "nJy",
+        read_noise: float,
         seed: int | None = None,
+        shape: tuple[int, int] = (NY, NX),
+        calib: float = 1.0,
+    ) -> Self:
+        rng = np.random.default_rng(seed)
+        image = rng.normal(0.0, read_noise, size=shape)
+        variance = np.full(shape, read_noise**2)
+
+        image = (image / calib).astype(np.float32)
+        variance = (variance / calib**2).astype(np.float32)
+        mask = np.zeros(shape, dtype=np.int32)
+        meta = {"READ_NOISE": read_noise, "SEED": seed, "CALIB": calib}
+
+        return cls(image, variance, mask, meta)
+
+    @classmethod
+    def simulate_dark(
+        cls,
+        dark_current: float,
+        read_noise: float = READ_NOISE,
+        seed: int | None = None,
+        shape: tuple[int, int] = (NY, NX),
+        calib: float = 1.0,
+    ) -> Self:
+        rng = np.random.default_rng(seed)
+        image = rng.normal(0.0, read_noise, size=shape)
+        variance = np.full(shape, read_noise**2)
+
+        image += rng.poisson(dark_current, size=shape) - dark_current
+        variance += dark_current
+
+        image = (image / calib).astype(np.float32)
+        variance = (variance / calib**2).astype(np.float32)
+        mask = np.zeros(shape, dtype=np.int32)
+        meta = {"DARK_CURRENT": dark_current, "READ_NOISE": read_noise, "SEED": seed, "CALIB": calib}
+
+        return cls(image, variance, mask, meta)
+
+    @classmethod
+    def simulate_flat(
+        cls,
+        band: str,
+        read_noise: float = READ_NOISE,
+        seed: int | None = None,
+        shape: tuple[int, int] = (NY, NX),
+        calib: float = 1.0,
+    ) -> Self:
+        rng = np.random.default_rng(seed)
+        image = rng.normal(0.0, read_noise, size=shape)
+        variance = np.full(shape, read_noise**2)
+
+        sky = SKY_COUNTS[band]
+        image += rng.poisson(sky, size=shape) - sky
+        variance += sky
+
+        image = (image / calib).astype(np.float32)
+        variance = (variance / calib**2).astype(np.float32)
+        mask = np.zeros(shape, dtype=np.int32)
+        meta = {"BAND": band, "READ_NOISE": read_noise, "SEED": seed, "CALIB": calib}
+
+        return cls(image, variance, mask, meta)
+
+    @classmethod
+    def simulate_stars(
+        cls,
+        stars: Star | list[Star],
+        band: str = "r",
+        read_noise: float = READ_NOISE,
+        seed: int | None = None,
+        shape: tuple[int, int] = (NY, NX),
+        calib: float = 1.0,
+    ) -> Self:
+        rng = np.random.default_rng(seed)
+        image = rng.normal(0.0, read_noise, size=shape)
+        variance = np.full(shape, read_noise**2)
+
+        sky = SKY_COUNTS[band]
+        image += rng.poisson(sky, size=shape) - sky
+        variance += sky
+
+        if not isinstance(stars, list):
+            stars = [stars]
+
+        for star in stars:
+            signal = star.get_signal(shape)
+            image += rng.poisson(signal)
+
+        image = (image / cls.calib).astype(np.float32)
+        variance = (variance / calib**2).astype(np.float32)
+        mask = np.zeros(shape, dtype=np.int32)
+        meta = {"BAND": band, "READ_NOISE": read_noise, "SEED": seed, "CALIB": calib}
+
+        return cls(image, variance, mask, meta)
+
+    @classmethod
+    def simulate_streaks(
+        cls,
+        streak: Streak | list[Streak],
+        band: str = "r",
+        read_noise: float = READ_NOISE,
+        seed: int | None = None,
+        shape: tuple[int, int] = (NY, NX),
+        calib: float = 1.0,
     ) -> Self:
         """Create a `SimulatedImage` instance by simulating an image with a
         single streak.
 
         Parameters
         ----------
-        streak : `Streak`
-            The streak geometry and brightness.
+        streak : `Streak`, optional
+            The streak geometry and brightness (None, by default).
         band : `str`, optional
             The filter band of the observation (r-band, by default).
         shape : `tuple` [`int`], optional
@@ -129,29 +223,26 @@ class SimulatedImage:
         simulated_image : `astro_lfd.sims.SimulatedImage`
             The simulated image with its variance and mask planes.
         """
-        sky = SKY_COUNTS[band]
-        signal = streak.get_signal(shape, fwhm=fwhm / pixel_scale)
         rng = np.random.default_rng(seed)
-
         image = rng.normal(0.0, read_noise, size=shape)
+        variance = np.full(shape, read_noise**2)
+
+        sky = SKY_COUNTS[band]
         image += rng.poisson(sky, size=shape) - sky
-        image += rng.poisson(signal)
-        variance = np.full(shape, read_noise**2) + sky + signal
+        variance += sky
+
+        if not isinstance(streaks, list):
+            streaks = [streaks]
+
+        for streak in streaks:
+            signal = streak.get_signal(shape)
+            image += rng.poisson(signal)
+            variance += signal
 
         image = (image / calib).astype(np.float32)
         variance = (variance / calib**2).astype(np.float32)
         mask = np.zeros(shape, dtype=np.int32)
-
-        meta = {
-            "BUNIT": unit,
-            "CALIB": calib,
-            "BAND": band,
-            "SEED": seed,
-            "RDNOISE": read_noise,
-            "FWHM": fwhm,
-            "PIXSCALE": pixel_scale,
-            **{f"STRK_{k.upper()}": v for k, v in asdict(streak).items()},
-        }
+        meta = {"BAND": band, "READ_NOISE": read_noise, "SEED": seed, "CALIB": calib}
 
         return cls(image, variance, mask, meta)
 

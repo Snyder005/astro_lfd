@@ -1,4 +1,5 @@
-import math
+from __future__ import annotations
+
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Self
 
@@ -8,8 +9,6 @@ from scipy.special import erf
 
 if TYPE_CHECKING:
     import lsst.geom as geom
-
-FWHM_TO_SIGMA: float = 1.0 / (2.0 * math.sqrt(2.0 * math.log(2.0)))
 
 
 @dataclass
@@ -43,14 +42,15 @@ class Streak:
     rho: float
     theta: float
     peak_signal: float
-    width: float
+    sigma: float
     length: float | None = None
+    width: float = 10.0
     s_center: float = 0.0
 
     @classmethod
     def from_center_length(
         cls,
-        center: "geom.Point2D | tuple[float, float]",
+        center: geom.Point2D | tuple[float, float],
         theta: float,
         length: float,
         peak_signal: float,
@@ -93,8 +93,8 @@ class Streak:
         if not isinstance(center, geom.Point2D):
             center = geom.Point2D(center[0], center[1])
 
-        theta_rad = math.radians(theta)
-        direction = geom.Extent2D(-math.sin(theta_rad), math.cos(theta_rad))
+        theta_rad = np.deg2rad(theta)
+        direction = geom.Extent2D(-np.sin(theta_rad), np.cos(theta_rad))
         line = Line2D.from_point_and_direction(center, direction)
 
         return cls(
@@ -127,11 +127,7 @@ class Streak:
         theta = np.deg2rad(self.theta)
         distance = gx * np.cos(theta) + gy * np.sin(theta) - self.rho
 
-        if fwhm is None:
-            transverse = self._box(distance, self.width / 2)
-        else:
-            sigma = fwhm * FWHM_TO_SIGMA
-            transverse = self._blurred_box(distance, self.width / 2, sigma)
+        transverse = self._blurred_box(distance, self.width / 2, self.sigma)
 
         if self.length is None:
             return transverse * self.peak_signal
@@ -139,38 +135,9 @@ class Streak:
         # Along-line (tangent) coordinate in the same PIXEL frame, gated by the
         # finite length. Ends taper with the same PSF sigma as the sides.
         s = -gx * np.sin(theta) + gy * np.cos(theta)
-        if fwhm is None:
-            longitudinal = self._box(s, self.length / 2, center=self.s_center)
-        else:
-            longitudinal = self._blurred_box(s, self.length / 2, sigma, center=self.s_center)
+        longitudinal = self._blurred_box(s, self.length / 2, self.sigma, center=self.s_center)
 
         return transverse * longitudinal * self.peak_signal
-
-    def _box(
-        self,
-        coord: NDArray[np.float64],
-        half_extent: float,
-        center: float = 0.0,
-    ) -> NDArray[np.float64]:
-        """Top-hat profile along one axis, peak-normalized to 1.
-
-        Parameters
-        ----------
-        coord : `numpy.ndarray`
-            The signed coordinate along the axis, in pixels.
-        half_extent : `float`
-            The half-extent of the top-hat, in pixels.
-        center : `float`, optional
-            The center of the top-hat along the axis, in pixels (0.0, by
-            default).
-
-        Returns
-        -------
-        normalized_profile : `numpy.ndarray`
-            Normalized profile values at each coordinate. Equal to 1 inside the
-            top-hat half-extent.
-        """
-        return (np.abs(coord - center) <= half_extent).astype(np.float64)
 
     def _blurred_box(
         self,
