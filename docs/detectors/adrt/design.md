@@ -131,23 +131,41 @@ emit) with the ADRT modifications from §1.
   for per-line normalization (Step 4).
 
 ### Step 4 — Accumulator conditioning & peak detection (replaces KHT accumulator)
-- **Normalize** for line length / valid-pixel count using `A_count` so short or
-  heavily-masked lines don't masquerade as strong detections.
+
+*Implemented in `ADRTDetectTask._find_peaks` (issue #7); design record in
+[`peak-detection-plan.md`](peak-detection-plan.md), rationale in
+`src/astro_lfd/algorithms/README.md`.*
+
+- **Normalize** to a significance `S = A / sqrt(L)`, with `L = adrt(ones)` the
+  digital line length (or `adrt(valid mask)` once masking is wired in), so `S`
+  has unit variance in every cell under white noise and short lines don't
+  masquerade as strong detections.
 - **Matched-filter** along the offset axis with a small kernel matched to the
   streak cross-section (~PSF FWHM) — the ADRT analogue of KHT's Gaussian kernel.
-- **Detect peaks per quadrant:** local maxima above an adaptive threshold
-  (e.g. `median + k·MAD` of the accumulator). Enforce a minimum separation in
-  `(offset, angle)` to avoid duplicate detections of one ridge.
+  *Not yet implemented; recommended preprocessing.*
+- **Detect peaks per quadrant:** local maxima (`maximum_filter`, footprint
+  7 × 31 cells) above `median + k·MAD` of `S`.
+- **Reject butterfly wings:** a height-axis local-contrast test (excess over the
+  median of an annulus along `h`) removes the broad wing ridges, then a greedy
+  non-maximum suppression in descending `S` removes wing residuals using a
+  physical envelope `sin(dW)/sin(d)·sqrt(L_peak/L)`, evaluated in the accepted
+  peak's quadrant frame so wings crossing seams are followed. This yields the
+  ranked output directly.
 - Optionally visualize with `adrt.utils.stitch_adrt` during development.
 
 ### Step 5 — Convert peaks to line parameters (replaces edge-pair clustering)
-- `offset, angle = adrt.utils.coord_adrt(N)`; index the peak cells to read
-  physical `(offset, angle)`.
-- Convert to **Hesse normal form** `ρ = x·cosθ + y·sinθ` **in original image
-  coordinates**, undoing the Step 0 padding/shift. Hand the resulting
+- Optional sub-cell refinement (three-point parabola along `h` and `s` by
+  default; the butterfly moment analysis is opt-in, see
+  [`butterfly.md`](butterfly.md)).
+- Convert `(q, h, s)` to **Hesse normal form** `ρ = x·cosθ + y·sinθ` with the
+  closed-form `_adrt_to_hesse` (validated against `adrt.utils.coord_adrt` to
+  1e-9; no coordinate tables are built), in the PIXEL frame of the ADRT grid.
+  The caller undoes binning and the Step 0 padding/shift and hands the
   image-centered `(rho, theta[deg])` to the shared profile-fit + output steps
   (see the unified design doc and
   [`knowledge/detector-task.md`](../../../knowledge/detector-task.md)).
+- Lines detected twice at a quadrant seam are de-duplicated in Hesse space
+  (3 px, 0.5°).
 - Recover width from the ridge's offset-extent (or a cross-ridge profile fit);
   recover endpoints via back-projection (Step 6). *No parallel-edge pairing is
   needed* — one streak → one line.
