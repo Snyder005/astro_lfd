@@ -183,7 +183,7 @@ class SimulatedExposure:
     @classmethod
     def simulate_streaks(
         cls,
-        streak: Streak | list[Streak],
+        streaks: Streak | list[Streak],
         band: str = "r",
         read_noise: float = READ_NOISE,
         seed: int | None = None,
