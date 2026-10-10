@@ -4,6 +4,7 @@ from dataclasses import dataclass
 
 import adrt
 import lsst.afw.image as afwImage
+import lsst.afw.math as afwMath
 import lsst.afw.table as afwTable
 import lsst.geom as geom
 import lsst.pex.config as pexConfig
@@ -12,38 +13,9 @@ import numpy as np
 from numpy.typing import NDArray
 from scipy import ndimage
 
-from .adrtButterfly import _adrt_to_hesse, _hesse_to_adrt, extract_segment_adrt
 from .base import get_line_mask, get_pixel_mask, timed
 from ..geom.line import Line2D
 from ..table.streakAdapter import StreakAdapter
-
-
-@dataclass(frozen=True)
-class AdrtPeak:
-    """A detected peak in the ADRT accumulator.
-
-    Attributes
-    ----------
-    q, h, s : `int`
-        Accumulator indices (quadrant, height, slope) of the local maximum.
-    h_refined, s_refined : `float`
-        Sub-cell height and slope after refinement (equal to ``h``, ``s`` when
-        no refinement was requested).
-    value : `float`
-        Significance of the peak: the accumulator value divided by the square
-        root of the digital line length, in units of the noise standard
-        deviation when the input is unit-variance white noise.
-    line : `~astro_lfd.geom.Line2D`
-        The line in the PIXEL frame of the grid the ADRT ran on.
-    """
-
-    q: int
-    h: int
-    s: int
-    h_refined: float
-    s_refined: float
-    value: float
-    line: Line2D
 
 
 class ADRTDetectConfig(pexConfig.Config):
@@ -59,6 +31,11 @@ class ADRTDetectConfig(pexConfig.Config):
         doc="Number of pixels to dilate the bad mask by.",
         dtype=int,
         default=1,
+    )
+    stats_mask_planes = pexConfig.ListField(
+        doc="Names of mask plane regions to ignore when calculating statistics.",
+        dtype=str,
+        default=["BAD", "SAT", "EDGE", "NO_DATA"],
     )
 
     # Configuration for postprocess
@@ -90,9 +67,6 @@ class ADRTDetectTask(pipeBase.Task):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.timings = {}
-        # Digital line length per accumulator cell, keyed by the ADRT domain
-        # size. One extra forward transform per N, reused across exposures.
-        self._line_length_cache: dict[int, NDArray[np.float32]] = {}
 
     def run(self, table: afwTable.SourceTable, exposure: afwImage.ExposureF) -> pipeBase.Struct:
         """Detect streaks in an exposure.
@@ -124,8 +98,8 @@ class ADRTDetectTask(pipeBase.Task):
         streaks = afwTable.SourceCatalog(table)
         self.timings = {}
 
-        imarr, bad_mask  = self.preprocess(exposure)
-        lines = self.detect(imarr)
+        imarr, bad_mask, sigma  = self.preprocess(exposure)
+        lines = self.detect(imarr, bad_mask, sigma)
         streak_mask = self.postprocess(streaks, exposure, lines)
 
         return pipeBase.Struct(
@@ -152,20 +126,44 @@ class ADRTDetectTask(pipeBase.Task):
         bad_mask : `numpy.ndarray`
             The bad pixel mask array
         """
-        imarr = exposure.image.array.copy()
         bad_mask = get_pixel_mask(
             exposure.mask,
             self.config.bad_mask_planes,
             dilation=self.config.bad_mask_dilation,
         )
-        imarr[bad_mask] = 0.0
+        padded_mask = np.ones((4096, 4096), dtype=bool)
+        padded_mask[:bad_mask.shape[0], :bad_mask.shape[1]] = bad_mask
 
+        imarr = exposure.image.array.copy()
         padded_imarr = np.zeros((4096, 4096))
         padded_imarr[:imarr.shape[0], :imarr.shape[1]] = imarr
-        return padded_imarr, bad_mask
+        padded_imarr[padded_mask] = 0.0
+
+        bad = exposure.mask.getPlaneBitMask(self.config.stats_mask_planes)
+        sctrl = afwMath.StatisticsControl()
+        sctrl.setAndMask(bad)
+        stats = afwMath.makeStatistics(exposure.maskedImage, afwMath.STDEVCLIP, sctrl)
+        sigma = stats.getValue(afwMath.STDEVCLIP)
+
+        return padded_imarr, padded_mask, sigma
 
     @timed("detect")
-    def detect(self, imarr: NDArray[np.float64]) -> list[Line2D]:
+    def detect(
+        self,
+        imarr: NDArray[np.float64],
+        bad_mask: NDArray[np.bool_],
+        sigma: float,
+        footprint: tuple[int, int] = (7, 31),
+        contrast_annulus: tuple[int, int] = (12, 40),
+        abs_min_threshold: float = 20.0,  # Elevate to configurable parameter
+        min_length: float = 64.0,
+        max_peaks: int = 50,
+        cone_pad: int = 4,
+        wing_margin: float = 1.0,
+        wing_threshold = 30.0,  # Elevate to configurable parameter
+        dedup_rho: float = 3.0,
+        dedup_theta: float = 0.5
+    ) -> list[Line2D]:
         """Perform linear feature detection on masked image array.
 
         Runs the forward ADRT and the multi-peak detector `_find_peaks` on the
@@ -182,8 +180,79 @@ class ADRTDetectTask(pipeBase.Task):
         lines : `list` [`~astro_lfd.geom.Line2D`]
             The detected lines, in the PIXEL frame.
         """
-        adrt_result = adrt.adrt(imarr)
-        lines = self._find_peaks(adrt_result)
+        L = adrt.adrt((~bad_mask).astype(float))
+        S = adrt.adrt(imarr) / (sigma * np.sqrt(np.maximum(L, 1.0)))
+        N = 4096
+
+        # Stage 1: local maxima above a robust threshold.
+        is_max = S == ndimage.maximum_filter(S, size=(1, *footprint), mode="nearest")
+        qhs = np.argwhere(is_max & (S > abs_min_threshold) & (L >= min_length))
+        n_local = len(qhs)
+
+        # Stage 2: height-axis local contrast. Wings are nearly as high
+        # tens of cells away along h; a real line peak is not.
+        if len(qhs):
+            off = np.arange(*contrast_annulus)
+            off = np.concatenate([-off, off])
+            hh = np.clip(qhs[:, 1, None] + off[None, :], 0, 2 * N - 2)
+            background = np.median(S[qhs[:, 0, None], hh, qhs[:, 2, None]], axis=1)
+            values = S[qhs[:, 0], qhs[:, 1], qhs[:, 2]]
+            keep = (values - background) > abs_min_threshold
+            qhs = qhs[keep]
+            values = values[keep]
+            order = np.argsort(-values, kind="stable")
+            qhs = qhs[order]
+            values = values[order]
+        else:
+            values = np.empty(0, dtype=np.float32)
+        n_contrast = len(qhs)
+
+        # Stage 3: greedy cone suppression. Every candidate is re-expressed in
+        # the accepted peak's quadrant frame so wings that cross a seam are
+        # still inside its cone.
+        rho_all, theta_all = _adrt_to_hesse(qhs[:, 0], qhs[:, 1], qhs[:, 2], N)
+        length_all = L[qhs[:, 0], qhs[:, 1], qhs[:, 2]]
+        alive = np.ones(len(qhs), dtype=bool)
+        accepted: list[int] = []
+        while alive.any() and len(accepted) < max_peaks:
+            i = int(np.flatnonzero(alive)[0])
+            accepted.append(i)
+            alive[i] = False
+            q, h, s = (int(v) for v in qhs[i])
+            width = _ridge_half_width(S[q], h, s, float(values[i]), cone_pad, footprint[1], N // 4)
+            _, theta_edge = _adrt_to_hesse(q, h, s + width, N)
+            sin_dw = abs(np.sin(float(theta_edge) - theta_all[i]))
+            _, h_frame, s_frame = _hesse_to_adrt(rho_all, theta_all, N, quadrant=q)
+            dh = np.abs(h_frame - h)
+            ds = np.abs(s_frame - s)
+            sin_d = np.abs(np.sin(theta_all - theta_all[i]))
+            with np.errstate(divide="ignore"):
+                envelope = sin_dw / sin_d * np.sqrt(length_all[i] / np.maximum(length_all, 1.0))
+            envelope = np.minimum(1.0, wing_margin * envelope) * values[i] + wing_threshold
+            in_wing = (dh <= ds + cone_pad) & (values <= envelope)
+            alive &= ~in_wing
+
+        # Stage 4: refinement, conversion, and seam de-duplication.
+        lines: list[Line2D] = []
+        for i in accepted:
+            q, h, s = (int(v) for v in qhs[i])
+            h_ref, s_ref = float(h), float(s)
+            rho_theta: tuple[float, float] | None = None
+            if rho_theta is None:
+                h_ref = h + _parabolic_offset(S[q, :, s], h)
+                s_ref = s + _parabolic_offset(S[q, h, :], s)
+                rho_arr, theta_arr = _adrt_to_hesse(q, h_ref, s_ref, N)
+                rho_theta = (float(rho_arr), float(theta_arr))
+            rho, theta = rho_theta
+            line = Line2D(rho, theta * geom.radians)
+            if any(_same_line(line, l, dedup_rho, np.deg2rad(dedup_theta)) for l in lines):
+                continue
+            lines.append(line)
+
+        self.log.debug(
+            f"ADRT peaks: {n_local} local maxima, {n_contrast} after contrast test, "
+            f"{len(accepted)} after suppression, {len(lines)} after de-duplication"
+        )
         self.log.info(f"The Approximate Discrete Radon Transform detected {len(lines):d} line(s)")
 
         return [] if len(lines) == 0 else lines
@@ -241,228 +310,153 @@ class ADRTDetectTask(pipeBase.Task):
 
         return streak_mask
 
-    def _line_length(self, N: int) -> NDArray[np.float32]:
-        """Digital line length of every accumulator cell for domain size ``N``.
 
-        The ADRT of an all-ones image counts the pixels on each digital line,
-        which is exactly the number of terms summed into the corresponding
-        accumulator cell. Cached per ``N``.
-        """
-        if N not in self._line_length_cache:
-            self._line_length_cache[N] = adrt.adrt(np.ones((N, N), dtype=np.float32))
-        return self._line_length_cache[N]
+def _hesse_to_adrt(
+    rho: NDArray[np.floating] | float,
+    theta: NDArray[np.floating] | float,
+    N: int,
+    quadrant: int | None = None,
+) -> tuple[NDArray[np.float64], NDArray[np.float64], NDArray[np.float64]]:
+    """Convert Hesse normal form parameters to ADRT coordinates.
 
-    def _find_peaks(
-        self,
-        adrt_result: NDArray[np.floating],
-        *,
-        line_length: NDArray[np.floating] | None = None,
-        k: float = 6.0,
-        k_contrast: float = 5.0,
-        footprint: tuple[int, int] = (7, 31),
-        contrast_annulus: tuple[int, int] = (12, 40),
-        wing_margin: float = 1.0,
-        wing_noise: float = 4.0,
-        cone_pad: int = 4,
-        min_length: float = 64.0,
-        max_peaks: int = 50,
-        dedup_rho: float = 3.0,
-        dedup_theta: float = 0.5,
-        refine: str = "parabolic",
-        return_peaks: bool = False,
-    ) -> list[Line2D] | tuple[list[Line2D], list[AdrtPeak]]:
-        """Detect multiple line peaks in the ADRT accumulator.
+    Analytic, vectorized map from Hesse normal ``(rho, theta)`` (in the ADRT's
+    binned/padded pixel grid) to ADRT quadrant/height/slope indices
+    ``(q, h, s)``. Returns floating-point indices so sub-pixel positions are
+    preserved. This is the counterpart to the accumulator-side slope/intercept
+    map in `_slope_intercept_map`; it places a known line's peak column, which
+    the simulation-based validation tests use to seed `extract_segment_adrt`.
 
-        Operates on the significance array ``S = A / sqrt(L)``, where ``A`` is
-        the accumulator and ``L`` the digital line length of each cell, so a
-        single threshold in noise-sigma units applies to every slope and
-        offset. Detection runs per quadrant in four vectorized stages:
+    ``theta`` is reduced modulo ``pi`` (Hesse lines are undirected). The
+    round-trip is exact in the interior; it is degenerate only on the
+    quadrant-boundary angles (0, 45, 90, 135 deg, i.e. ``s == 0`` and
+    ``s == N - 1``), where adjacent ADRT quadrants share the same slope and the
+    quadrant assignment is a convention choice.
 
-        1. Local maxima of ``S`` within an anisotropic ``footprint`` that exceed
-           the quadrant's ``median + k * MAD`` and have ``L >= min_length``.
-        2. A height-axis local-contrast test that rejects the broad "butterfly
-           wing" ridges a bright streak casts across neighbouring slope
-           columns: the peak must exceed the median of its own column at
-           ``contrast_annulus`` cells away by ``k_contrast * MAD``.
-        3. Greedy non-maximum suppression in descending ``S``: once a peak is
-           accepted, weaker candidates inside its wing cone
-           ``|dh| <= |ds| + cone_pad`` (evaluated in the accepted peak's
-           quadrant frame, so the cone reaches across quadrant seams) and
-           below the wing envelope are discarded. The envelope is the
-           expected wing amplitude of a streak whose ridge has angular
-           half-width ``dW``: ``sin(dW) / sin(d) * sqrt(L_peak / L)`` at
-           angular distance ``d``, scaled by ``wing_margin``.
-        4. Optional sub-cell refinement, closed-form conversion to Hesse
-           ``(rho, theta)`` via `_adrt_to_hesse`, and de-duplication in Hesse
-           space of lines that appear on both sides of a quadrant seam.
+    Parameters
+    ----------
+    rho, theta : `numpy.ndarray` or `float`
+        The Hesse normal form rho (pixels) and theta (radians) parameters.
+    N : `int`
+        Size of the ADRT domain (must be a power of 2).
+    quadrant : `int`, optional
+        Force every line into the coordinate frame of this quadrant instead of
+        the one its angle falls in. Lines outside the quadrant's 45-degree band
+        then get extrapolated indices (``s`` outside ``[0, N-1]``), which is
+        how a peak's neighbourhood is measured across a quadrant seam.
 
-        All coordinates are in the PIXEL frame of the grid the ADRT ran on
-        (binned/padded); the caller undoes any binning.
+    Returns
+    -------
+    q, h, s : `numpy.ndarray`
+        The ADRT quadrant, height, and slope indices, broadcast to the common
+        shape of ``rho`` and ``theta``. ``q`` is integer-valued; ``h`` and
+        ``s`` may be fractional.
+    """
+    rho = np.asarray(rho, dtype=np.float64)
+    theta = np.asarray(theta, dtype=np.float64)
+    c = (N - 1) / 2.0
 
-        Parameters
-        ----------
-        adrt_result : `numpy.ndarray`, (4, 2N-1, N)
-            The ADRT accumulator.
-        line_length : `numpy.ndarray`, (4, 2N-1, N), optional
-            Digital line length (number of valid pixels) per cell. Defaults
-            to the ADRT of an all-ones image; pass the ADRT of the valid-pixel
-            mask to account for masked regions.
-        k : `float`, optional
-            Detection threshold above the per-quadrant median, in robust
-            (MAD-based) sigma units.
-        k_contrast : `float`, optional
-            Minimum local contrast over the column background, in the same
-            sigma units.
-        footprint : `tuple` [`int`, `int`], optional
-            Size of the local-maximum neighbourhood along ``(height, slope)``.
-        contrast_annulus : `tuple` [`int`, `int`], optional
-            Half-open range of height offsets ``[inner, outer)`` on each side of
-            a candidate over which the column background is measured.
-        wing_margin : `float`, optional
-            Multiplier on the wing envelope. A streak of width ``w`` and
-            length ``l`` has ridge angular half-width ``dW ~ w / l`` and casts
-            a wing of relative accumulator amplitude ``sin(dW) / sin(d)`` at
-            angular distance ``d`` (each line at that angle crosses the streak
-            over ``w / sin(d)`` pixels); the ``sqrt(L)`` normalization adds the
-            line-length factor. Measured wings reach 0.5-0.9 of this model, so
-            1.0 suppresses them with a small safety margin. Fainter lines
-            crossing inside the cone below the envelope are indistinguishable
-            from wings by amplitude and are suppressed too.
-        wing_noise : `float`, optional
-            Noise allowance added to the wing envelope, in the quadrant's
-            MAD-based sigma units. Wing residuals near the detection threshold
-            are local maxima of wing plus noise, so they overshoot the
-            noise-free envelope by a few sigma; the maximum over the many
-            cells of a wing crest reaches about 4 sigma.
-        cone_pad : `int`, optional
-            Extra height cells added to the wing cone half-width.
-        min_length : `float`, optional
-            Minimum digital line length for a cell to be a candidate.
-        max_peaks : `int`, optional
-            Maximum number of peaks accepted by the suppression stage.
-        dedup_rho, dedup_theta : `float`, optional
-            Two accepted lines closer than this in rho (pixels) and theta
-            (degrees) are the same line; the more significant one is kept.
-        refine : `str`, optional
-            Sub-cell refinement: ``"none"``, ``"parabolic"`` (three-point
-            parabola along each axis) or ``"butterfly"``
-            (`extract_segment_adrt`, falling back to parabolic where its slope
-            band is under-determined). The butterfly moments span the full
-            height axis of every slope column, so at unit per-pixel noise the
-            noise second moment dominates and the result is unreliable; use it
-            only on high-SNR or background-suppressed accumulators.
-        return_peaks : `bool`, optional
-            Also return the accumulator-space peak descriptors.
+    # Reduce to [0, pi) and pick the quadrant + base line angle. The four ADRT
+    # quadrants tile [0, pi) in normal-vector angle as: [0, pi/4)->3,
+    # [pi/4, pi/2)->2, [pi/2, 3pi/4)->1, [3pi/4, pi)->0.
+    th = np.mod(theta, np.pi)
+    if quadrant is None:
+        conds = [th < np.pi / 4.0, th < np.pi / 2.0, th < 3.0 * np.pi / 4.0]
+        q = np.select(conds, [3, 2, 1], default=0)
+    else:
+        # Bring theta to within half a turn of the quadrant's band center;
+        # shifting by pi flips the sign of rho for the same line.
+        center = (7 - 2 * quadrant) * np.pi / 8.0
+        turns = np.round((center - th) / np.pi)
+        th = th + turns * np.pi
+        rho = rho * np.where(turns % 2 == 0, 1.0, -1.0)
+        q = np.broadcast_to(np.asarray(quadrant), th.shape)
+    ts = np.select(
+        [q == 3, q == 2, q == 1],
+        [th, np.pi / 2.0 - th, th - np.pi / 2.0],
+        default=np.pi - th,
+    )
 
-        Returns
-        -------
-        lines : `list` [`~astro_lfd.geom.Line2D`]
-            The detected lines, ranked by descending significance.
-        peaks : `list` [`AdrtPeak`]
-            The matching peak descriptors; only if ``return_peaks`` is set.
-        """
-        if refine not in ("none", "parabolic", "butterfly"):
-            raise ValueError(f"unknown refinement: {refine!r}")
-        if adrt_result.ndim != 3 or adrt_result.shape[0] != 4:
-            raise ValueError(f"expected an ADRT array of shape (4, 2N-1, N), got {adrt_result.shape}")
-        N = adrt_result.shape[2]
-        if adrt_result.shape[1] != 2 * N - 1:
-            raise ValueError(f"expected an ADRT array of shape (4, 2N-1, N), got {adrt_result.shape}")
+    # Invert the slope geometry.
+    ns = np.tan(ts)
+    s = ns * (N - 1)
+    cs = np.cos(ts) + np.sin(ts)
 
-        L = self._line_length(N) if line_length is None else np.asarray(line_length)
-        S = (adrt_result / np.sqrt(np.maximum(L, 1.0))).astype(np.float32)
+    # Invert the rho recenter/scale to recover the Radon offset, undo the
+    # quadrant sign flip, then invert the height mapping. Trig uses `th` so it
+    # is consistent with the quadrant reduction above.
+    offset = (c * (np.cos(th) + np.sin(th)) - rho) / N
+    h0 = np.where(q % 2 == 0, offset, -offset)
+    hi = (h0 / cs + 0.5) * (1.0 + ns) - ((2.0 * N - 1.0) / (2.0 * N)) * ns
+    h = N * (1.0 - hi) - 0.5
 
-        # Stage 1: per-quadrant local maxima above a robust threshold. The
-        # filter never crosses the quadrant axis; the noise level is estimated
-        # on a 1/64 subsample of the populated cells.
-        is_max = S == ndimage.maximum_filter(S, size=(1, *footprint), mode="nearest")
-        sub = S[:, ::8, ::8]
-        sub_ok = L[:, ::8, ::8] > 0
-        cand: list[NDArray[np.intp]] = []
-        mads = np.empty(4)
-        for q in range(4):
-            sample = sub[q][sub_ok[q]]
-            median = np.median(sample)
-            mads[q] = 1.4826 * np.median(np.abs(sample - median))
-            keep = is_max[q] & (S[q] > median + k * mads[q]) & (L[q] >= min_length)
-            hs = np.argwhere(keep)
-            cand.append(np.column_stack([np.full(len(hs), q), hs]))
-        qhs = np.vstack(cand)
-        n_local = len(qhs)
+    return q.astype(np.float64), h, s
 
-        # Stage 2: height-axis local contrast. Wings are nearly as high
-        # tens of cells away along h; a real line peak is not.
-        if n_local:
-            off = np.arange(*contrast_annulus)
-            off = np.concatenate([-off, off])
-            hh = np.clip(qhs[:, 1, None] + off[None, :], 0, 2 * N - 2)
-            background = np.median(S[qhs[:, 0, None], hh, qhs[:, 2, None]], axis=1)
-            values = S[qhs[:, 0], qhs[:, 1], qhs[:, 2]]
-            keep = (values - background) > k_contrast * mads[qhs[:, 0]]
-            qhs = qhs[keep]
-            values = values[keep]
-            order = np.argsort(-values, kind="stable")
-            qhs = qhs[order]
-            values = values[order]
-        else:
-            values = np.empty(0, dtype=np.float32)
-        n_contrast = len(qhs)
 
-        # Stage 3: greedy cone suppression. Every candidate is re-expressed in
-        # the accepted peak's quadrant frame so wings that cross a seam are
-        # still inside its cone.
-        rho_all, theta_all = _adrt_to_hesse(qhs[:, 0], qhs[:, 1], qhs[:, 2], N)
-        length_all = L[qhs[:, 0], qhs[:, 1], qhs[:, 2]]
-        alive = np.ones(len(qhs), dtype=bool)
-        accepted: list[int] = []
-        while alive.any() and len(accepted) < max_peaks:
-            i = int(np.flatnonzero(alive)[0])
-            accepted.append(i)
-            alive[i] = False
-            q, h, s = (int(v) for v in qhs[i])
-            width = _ridge_half_width(S[q], h, s, float(values[i]), cone_pad, footprint[1], N // 4)
-            _, theta_edge = _adrt_to_hesse(q, h, s + width, N)
-            sin_dw = abs(np.sin(float(theta_edge) - theta_all[i]))
-            _, h_frame, s_frame = _hesse_to_adrt(rho_all, theta_all, N, quadrant=q)
-            dh = np.abs(h_frame - h)
-            ds = np.abs(s_frame - s)
-            sin_d = np.abs(np.sin(theta_all - theta_all[i]))
-            with np.errstate(divide="ignore"):
-                envelope = sin_dw / sin_d * np.sqrt(length_all[i] / np.maximum(length_all, 1.0))
-            envelope = np.minimum(1.0, wing_margin * envelope) * values[i] + wing_noise * mads[qhs[:, 0]]
-            in_wing = (dh <= ds + cone_pad) & (values <= envelope)
-            alive &= ~in_wing
+def _adrt_to_hesse(
+    q: NDArray[np.integer] | int,
+    h: NDArray[np.number] | float,
+    s: NDArray[np.number] | float,
+    N: int,
+) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
+    """Convert ADRT coordinates to Hesse normal form parameters.
 
-        # Stage 4: refinement, conversion, and seam de-duplication.
-        peaks: list[AdrtPeak] = []
-        for i in accepted:
-            q, h, s = (int(v) for v in qhs[i])
-            h_ref, s_ref = float(h), float(s)
-            rho_theta: tuple[float, float] | None = None
-            if refine == "butterfly":
-                try:
-                    segment = extract_segment_adrt(adrt_result, q, h, s, N)
-                    rho_theta = (segment.rho, segment.theta)
-                except ValueError as exc:
-                    self.log.debug(f"butterfly refinement failed at {(q, h, s)}: {exc}")
-            if rho_theta is None:
-                if refine != "none":
-                    h_ref = h + _parabolic_offset(S[q, :, s], h)
-                    s_ref = s + _parabolic_offset(S[q, h, :], s)
-                rho_arr, theta_arr = _adrt_to_hesse(q, h_ref, s_ref, N)
-                rho_theta = (float(rho_arr), float(theta_arr))
-            rho, theta = rho_theta
-            line = Line2D(rho, theta * geom.radians)
-            if any(_same_line(line, p.line, dedup_rho, np.deg2rad(dedup_theta)) for p in peaks):
-                continue
-            peaks.append(AdrtPeak(q, h, s, h_ref, s_ref, float(values[i]), line))
+    Analytic, vectorized inverse of `_hesse_to_adrt`: maps ADRT
+    quadrant/height/slope indices ``(q, h, s)`` to Hesse normal ``(rho, theta)``
+    in the PIXEL frame of the grid the ADRT ran on (binned/padded). It
+    reproduces `adrt.utils.coord_adrt` cell by cell without materializing the
+    ``(4, 2N-1, N)`` coordinate arrays, and accepts fractional ``h`` and ``s``
+    so sub-pixel peak positions convert directly.
 
-        self.log.debug(
-            f"ADRT peaks: {n_local} local maxima, {n_contrast} after contrast test, "
-            f"{len(accepted)} after suppression, {len(peaks)} after de-duplication"
-        )
-        lines = [p.line for p in peaks]
-        return (lines, peaks) if return_peaks else lines
+    ``theta`` is returned in ``[0, pi)`` with ``rho`` sign-flipped accordingly,
+    matching the `~astro_lfd.geom.Line2D` canonical form and the input
+    convention of `_hesse_to_adrt`.
+
+    Parameters
+    ----------
+    q : `numpy.ndarray` or `int`
+        The ADRT quadrant index (0-3).
+    h, s : `numpy.ndarray` or `float`
+        The ADRT height and slope indices; may be fractional.
+    N : `int`
+        Size of the ADRT domain (must be a power of 2).
+
+    Returns
+    -------
+    rho, theta : `numpy.ndarray`
+        The Hesse normal form rho (pixels) and theta (radians, in ``[0, pi)``),
+        broadcast to the common shape of the inputs.
+    """
+    q = np.asarray(q)
+    h = np.asarray(h, dtype=np.float64)
+    s = np.asarray(s, dtype=np.float64)
+    c = (N - 1) / 2.0
+
+    # Slope geometry: the digital line slope in the quadrant's local frame and
+    # the ADRT height -> Radon offset map (the same algebra as in
+    # `adrt.utils.coord_adrt`, here in closed form).
+    ns = s / (N - 1)
+    ts = np.arctan(ns)
+    cs = np.cos(ts) + np.sin(ts)
+    hi = 1.0 - (2.0 * h + 1.0) / (2.0 * N)
+    h0 = ((hi + ((2.0 * N - 1.0) / (2.0 * N)) * ns) / (1.0 + ns) - 0.5) * cs
+    offset = np.where(q % 2 == 0, h0, -h0)
+
+    # Quadrant-dependent line angle, then to the normal angle and recenter the
+    # offset from the image center to the PIXEL origin.
+    angle = np.select(
+        [q == 0, q == 1, q == 2, q == 3],
+        [ts - np.pi / 2.0, -ts, ts, np.pi / 2.0 - ts],
+    )
+    theta = np.pi / 2.0 - angle
+    rho = -offset * N + c * (np.cos(theta) + np.sin(theta))
+
+    # Canonicalize to theta in [0, pi).
+    theta = np.mod(theta, 2.0 * np.pi)
+    flip = theta >= np.pi
+    theta = np.where(flip, theta - np.pi, theta)
+    rho = np.where(flip, -rho, rho)
+
+    return rho, theta
 
 
 def _ridge_half_width(
