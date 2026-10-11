@@ -366,6 +366,46 @@ class Line2D(LineGeometry2D):
         delta = point - self.origin
         return _dot(delta, self.normal)
 
+    def along_coordinate_array(self, x: ArrayLike, y: ArrayLike) -> NDArray[np.float64]:
+        """Return the signed coordinates along the line direction for arrays.
+
+        Vectorized form of `along_coordinate`; ``x`` and ``y`` follow numpy
+        broadcasting rules.
+
+        Parameters
+        ----------
+        x, y : `numpy.typing.ArrayLike`
+            Coordinates of the points to project along the line direction.
+
+        Returns
+        -------
+        s : `numpy.ndarray`
+            The signed coordinates along the line direction relative to the
+            point closest to the origin.
+        """
+        d = self.direction
+        return np.asarray(x) * d.x + np.asarray(y) * d.y
+
+    def normal_coordinate_array(self, x: ArrayLike, y: ArrayLike) -> NDArray[np.float64]:
+        """Return the signed coordinates along the line normal for arrays.
+
+        Vectorized form of `normal_coordinate`; ``x`` and ``y`` follow numpy
+        broadcasting rules.
+
+        Parameters
+        ----------
+        x, y : `numpy.typing.ArrayLike`
+            Coordinates of the points to project along the line normal.
+
+        Returns
+        -------
+        r : `numpy.ndarray`
+            The signed coordinates along the line normal relative to the point
+            closest to the origin.
+        """
+        n = self.normal
+        return np.asarray(x) * n.x + np.asarray(y) * n.y - self.rho
+
     def contains(self, point: geom.Point2D, atol: float = 1e-12) -> bool:
         """Return `True` if point lies on the line geometry.
 
