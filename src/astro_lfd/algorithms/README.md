@@ -32,9 +32,30 @@ of the region around a peak.
 
 ## Design Decisions
 
-The profile fitter (`Line`, `LineProfile`) is imported from ``maskStreaks``
-rather than reimplemented, so any difference in the fit itself is shared
-between the tasks.
+### Profile fit plugin (`plugins.FitProfile`)
+
+`FitProfile` is a port of `maskStreaks.LineProfile` (plus the fitting steps of
+`MaskStreaksTask`) that takes and returns `Line2D` lines in the exposure
+PIXEL frame. Converting from a detector's own frame (e.g. the KHT
+image-centered frame) is the enclosing task's job, so the conversion can be
+dropped once lines come from a PIXEL-frame catalog.
+
+**Why the result does not depend on the frame origin.** The fit parameters
+`(rho, theta)` are coupled: a small change in `theta` moves the line by
+`rho`-sized distances far from the origin, which changes the Newton steps and
+the line search. Internally the fit runs in a frame centered on the bounding
+box. This also makes the `rho` sanity checks (fit moved more than
+`2 * rho_bin_size`, or `|rho|` beyond 1.5x the half-diagonal) mean the same
+thing for every exposure. Translating the exposure (`XY0`) or the input line changes the result
+by only ~1e-8 px (floating-point rounding). The fit uses raw `(rho, theta)`
+(not canonicalized like `Line2D`) so the derivatives stay continuous across
+`theta = 0, 180` deg.
+
+**Why the along-line bins start at the minimum along-line coordinate.**
+Detection-gap and outlier rejection bin pixels in 5 px bins along the line.
+`LineProfile` measured that coordinate from one of the line's box
+intersections, whose choice depends on edge ordering; using the minimum over
+the masked pixels gives the same bins without the box geometry.
 
 ### ADRT multi-peak detection (`ADRTDetectTask._find_peaks`)
 
