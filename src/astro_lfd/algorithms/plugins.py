@@ -106,9 +106,8 @@ class FitProfile:
 
     Notes
     -----
-    Lines are in the PIXEL frame of the exposure (the frame of its bounding
-    box). Internally the fit is performed relative to the center of the
-    bounding box, so the result does not depend on the frame origin.
+    Input and output lines are in the PIXEL frame of the exposure (the frame
+    of its bounding box).
     """
 
     ConfigClass = FitProfileConfig
@@ -151,21 +150,12 @@ class FitProfile:
         weights[get_pixel_mask(exposure.mask, self.config.bad_mask_planes)] = 0
         detection_mask = get_pixel_mask(exposure.mask, self.config.detected_mask_plane)
 
-        # Fit in a frame centered on the bounding box: keeps the rho-theta
-        # coupling (and so the Newton steps) independent of the PIXEL origin.
-        bbox = exposure.getBBox()
-        offset = geom.Extent2D(geom.Box2D(bbox).getCenter())
-        local_bbox = geom.Box2D(bbox)
-        local_bbox.shift(-offset)
-        origin = geom.Point2D(bbox.getMin()) - offset
-
-        model = _ProfileModel(data, weights, origin, local_bbox)
-        init_line = line.translated(-offset)
+        model = _ProfileModel(data, weights, exposure.getBBox())
         sigma = self.config.inv_sigma**-1
-        if not model.set_line_mask(init_line, 20 * sigma, detection_mask=detection_mask, log=self.log):
+        if not model.set_line_mask(line, 20 * sigma, detection_mask=detection_mask, log=self.log):
             return None
 
-        rho, theta = init_line.rho, init_line.theta.asRadians()
+        rho, theta = line.rho, line.theta.asRadians()
         x, reduced_chi2, failure = model.fit(
             np.array([rho, theta, sigma**-1]),
             dchi2_tol=self.config.dchi2_tolerance,
@@ -176,9 +166,11 @@ class FitProfile:
         fit_sigma = abs(x[2]) ** -1
 
         # Initial estimate should be quite close: fit is deemed unsuccessful
-        # if rho or theta change by more than twice the allowed bin size. Raw
-        # parameters are compared, so there is no wrap-around at 0/180 deg.
-        if (abs(x[0] - rho) > 2 * self.config.rho_bin_size) or (
+        # if the line moves (at the image center) or theta changes by more
+        # than twice the allowed bin size. Raw theta is compared, so there is
+        # no wrap-around at 0/180 deg.
+        shift = model.center_distance(x[0], x[1]) - model.center_distance(rho, theta)
+        if (abs(shift) > 2 * self.config.rho_bin_size) or (
             abs(np.rad2deg(x[1] - theta)) > 2 * self.config.theta_bin_size
         ):
             failure = True
@@ -198,7 +190,7 @@ class FitProfile:
         final_model = model.make_profile(x[0], x[1], fit_sigma)
 
         return pipeBase.Struct(
-            line=fit_line.translated(offset),
+            line=fit_line,
             sigma=fit_sigma,
             reduced_chi2=reduced_chi2,
             model_maximum=abs(final_model).max(),
@@ -210,7 +202,7 @@ class _ProfileModel:
     """Moffat line profile model of the image data near a line.
 
     Fit parameters are ``rho`` (pixels), ``theta`` (radians), and
-    ``1 / sigma`` (inverse pixels) in the local frame. They are kept raw
+    ``1 / sigma`` (inverse pixels) in the PIXEL frame. They are kept raw
     (not canonicalized like `Line2D`), so the derivatives stay continuous
     when ``theta`` crosses 0 or 180 degrees.
 
@@ -220,10 +212,8 @@ class _ProfileModel:
         The image data.
     weights : `numpy.ndarray`, (Ny, Nx)
         The pixel weights; pixels with zero weight are excluded.
-    origin : `lsst.geom.Point2D`
-        Local-frame coordinates of the ``[0, 0]`` array pixel.
-    bbox : `lsst.geom.Box2D`
-        Local-frame bounding box of the image.
+    bbox : `lsst.geom.Box2I`
+        PIXEL-frame bounding box of the image.
     """
 
     BIN_SIZE: float = 5.0
@@ -233,17 +223,20 @@ class _ProfileModel:
         self,
         data: NDArray[np.floating],
         weights: NDArray[np.floating],
-        origin: geom.Point2D,
-        bbox: geom.Box2D,
+        bbox: geom.Box2I,
     ):
         self.data = data
         self.weights = weights
-        self.bbox = bbox
-        self._rho_max = 0.5 * math.hypot(bbox.width, bbox.height)
-        ny, nx = data.shape
-        self._x = origin.x + np.arange(nx)
-        self._y = origin.y + np.arange(ny)
+        self.bbox = geom.Box2D(bbox)
+        self._center = self.bbox.getCenter()
+        self._half_diagonal = 0.5 * math.hypot(self.bbox.width, self.bbox.height)
+        self._x = np.arange(bbox.getMinX(), bbox.getMaxX() + 1)
+        self._y = np.arange(bbox.getMinY(), bbox.getMaxY() + 1)
         self.mask = weights != 0
+
+    def center_distance(self, rho: float, theta: float) -> float:
+        """Return the signed distance from the image center to the line."""
+        return math.cos(theta) * self._center.x + math.sin(theta) * self._center.y - rho
 
     def set_line_mask(
         self,
@@ -257,7 +250,7 @@ class _ProfileModel:
         Parameters
         ----------
         line : `astro_lfd.geom.Line2D`
-            The line, in the local frame.
+            The line, in the PIXEL frame.
         width : `float`
             Full width in pixels of the mask.
         detection_mask : `numpy.ndarray`, (Ny, Nx), optional
@@ -471,7 +464,7 @@ class _ProfileModel:
                 factor, *_ = scipy.optimize.brent(line_search, args=(dx,), full_output=True, tol=0.05)
 
             x -= factor * dx
-            if (abs(x[0]) > 1.5 * self._rho_max) or (n_iter > max_iter):
+            if (abs(self.center_distance(x[0], x[1])) > 1.5 * self._half_diagonal) or (n_iter > max_iter):
                 failure = True
                 break
             old_chi2 = chi2

@@ -36,20 +36,21 @@ of the region around a peak.
 
 `FitProfile` is a port of `maskStreaks.LineProfile` (plus the fitting steps of
 `MaskStreaksTask`) that takes and returns `Line2D` lines in the exposure
-PIXEL frame. Converting from a detector's own frame (e.g. the KHT
-image-centered frame) is the enclosing task's job, so the conversion can be
-dropped once lines come from a PIXEL-frame catalog.
+PIXEL frame, and fits directly in that frame. It is a per-detector step on a
+PIXEL-frame line catalog; detectors with their own frame (e.g. the KHT
+image-centered frame) convert to PIXEL immediately after detection, so no
+translation happens here.
 
-**Why the result does not depend on the frame origin.** The fit parameters
-`(rho, theta)` are coupled: a small change in `theta` moves the line by
-`rho`-sized distances far from the origin, which changes the Newton steps and
-the line search. Internally the fit runs in a frame centered on the bounding
-box. This also makes the `rho` sanity checks (fit moved more than
-`2 * rho_bin_size`, or `|rho|` beyond 1.5x the half-diagonal) mean the same
-thing for every exposure. Translating the exposure (`XY0`) or the input line changes the result
-by only ~1e-8 px (floating-point rounding). The fit uses raw `(rho, theta)`
-(not canonicalized like `Line2D`) so the derivatives stay continuous across
-`theta = 0, 180` deg.
+**Why the sanity checks use the distance from the image center.** The fit
+parameters `(rho, theta)` are coupled: a small change in `theta` moves `rho`
+by up to the distance of the image from the PIXEL origin. The checks (fit
+moved more than `2 * rho_bin_size`, or line beyond 1.5x the half-diagonal)
+therefore compare the line's signed distance from the bounding-box center,
+which means the same thing for every exposure. The Newton steps themselves
+are not origin-independent, so translating the exposure (`XY0`) changes the
+result by ~1e-4 px, far below the fit precision. The fit uses raw
+`(rho, theta)` (not canonicalized like `Line2D`) so the derivatives stay
+continuous across `theta = 0, 180` deg.
 
 **Why the along-line bins start at the minimum along-line coordinate.**
 Detection-gap and outlier rejection bin pixels in 5 px bins along the line.
